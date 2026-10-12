@@ -195,6 +195,7 @@ function Dashboard({ data, summary, panchayats, activities, onNavigate, onClearS
 
   return (
     <>
+      <h1 className="welcome-heading"><span>Welcome to Nathnagar Constituency</span></h1>
       <AskAI constituencyName={data.constituency.name} />
       <PageHeading
         eyebrow="CONSTITUENCY INTELLIGENCE"
