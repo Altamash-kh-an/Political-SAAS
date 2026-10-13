@@ -7,6 +7,7 @@ import {
   CircleAlert,
   FileText,
   Lightbulb,
+  LogIn,
   MapPin,
   MessageSquare,
   ShieldCheck,
@@ -397,7 +398,7 @@ function Insights({ summary }) {
   );
 }
 
-function SettingsPage({ data }) {
+function SettingsPage({ data, onLogin }) {
   return (
     <>
       <PageHeading eyebrow="ACCOUNT" title="Settings" description="Workspace information for this local demo." />
@@ -409,6 +410,17 @@ function SettingsPage({ data }) {
         </div>
         <DataNote>Account, notification, and constituency settings are not persisted because no backend or user preference store is available.</DataNote>
       </Panel>
+      <Panel
+        title="Account access"
+        eyebrow="AUTHENTICATION"
+        action={
+          <button className="button button-secondary" type="button" onClick={onLogin}>
+            <LogIn size={15} /> Log in
+          </button>
+        }
+      >
+        <DataNote>Authentication is not configured. You can open the login screen and return to the sample dashboard without signing in.</DataNote>
+      </Panel>
     </>
   );
 }
@@ -418,7 +430,7 @@ function Metric({ icon: Icon, label, value }) {
 }
 
 export function WorkspacePage(props) {
-  const { page, data, summary, panchayats, activities, search, activityPeriod, activityPeriods, onActivityPeriodChange, onNavigate, onSearchChange } = props;
+  const { page, data, summary, panchayats, activities, search, activityPeriod, activityPeriods, onActivityPeriodChange, onNavigate, onSearchChange, onLogin } = props;
   switch (page) {
     case "Election Overview": return <ElectionOverview summary={summary} />;
     case "Booth Management": return <BoothManagement summary={summary} />;
@@ -428,7 +440,7 @@ export function WorkspacePage(props) {
     case "Issues & Reports": return <IssuesReports activities={activities} />;
     case "Field Activities": return <FieldActivities activities={activities} activityPeriod={activityPeriod} activityPeriods={activityPeriods} onActivityPeriodChange={onActivityPeriodChange} />;
     case "AI Insights": return <Insights summary={summary} />;
-    case "Settings": return <SettingsPage data={data} />;
+    case "Settings": return <SettingsPage data={data} onLogin={onLogin} />;
     case "Dashboard":
     default:
       return <Dashboard data={data} summary={summary} panchayats={panchayats} activities={activities} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />;

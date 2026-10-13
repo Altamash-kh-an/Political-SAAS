@@ -6,6 +6,7 @@ import {
   ChevronRight,
   ClipboardList,
   Home,
+  LogIn,
   Map,
   MapPin,
   Menu,
@@ -18,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import LoginPage from "./LoginPage";
 import {
   filterActivities,
   filterRecordsBySearch,
@@ -50,6 +52,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showSampleWorkspace, setShowSampleWorkspace] = useState(true);
   const searchInputRef = useRef(null);
   const summary = summarizePanchayats(dashboardData.panchayats);
 
@@ -64,6 +67,10 @@ function App() {
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
   }, []);
+
+  if (!showSampleWorkspace) {
+    return <LoginPage onPreviewWorkspace={returnToDashboard} />;
+  }
 
   const filteredPanchayats = filterRecordsBySearch(
     dashboardData.panchayats,
@@ -81,6 +88,17 @@ function App() {
     setSidebarOpen(false);
     setSearch("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openLogin() {
+    setShowSampleWorkspace(false);
+    setShowNotifications(false);
+  }
+
+  function returnToDashboard() {
+    setActivePage("Dashboard");
+    setSearch("");
+    setShowSampleWorkspace(true);
   }
 
   function toggleSidebar() {
@@ -105,6 +123,7 @@ function App() {
       onSearchChange={setSearch}
       onActivityPeriodChange={setActivityPeriod}
       onNavigate={navigate}
+      onLogin={openLogin}
     />
   );
 
@@ -204,6 +223,9 @@ function App() {
                 </div>
               )}
             </div>
+            <button className="button button-secondary topbar-login" type="button" onClick={openLogin}>
+              <LogIn size={15} /> Log in
+            </button>
           </div>
         </header>
 
