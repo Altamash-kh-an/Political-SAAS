@@ -1,6 +1,7 @@
 
 import base64
 import binascii
+import logging
 import os
 import secrets
 from collections.abc import AsyncGenerator
@@ -11,11 +12,29 @@ from typing import Literal
 
 from dotenv import load_dotenv
 import jwt
-from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    ValidationInfo,
+    field_validator,
+)
 from pwdlib import PasswordHash
 from pwdlib.exceptions import UnknownHashError
-from sqlalchemy import DateTime, Integer, String, func, select, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -23,8 +42,15 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, validates
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    validates,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.responses import JSONResponse
 
 
 class Base(DeclarativeBase):
@@ -40,6 +66,12 @@ class User(Base):
     )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    mobile_number: Mapped[str | None] = mapped_column(String(13), nullable=True)
+    father_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    qualification: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    nearby_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -51,15 +83,111 @@ class User(Base):
         return value
 
 
+class Panchayat(Base):
+    __tablename__ = "panchayats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    booths: Mapped[list["Booth"]] = relationship(
+        back_populates="panchayat", passive_deletes="all"
+    )
+
+
+class Booth(Base):
+    __tablename__ = "booths"
+    __table_args__ = (
+        UniqueConstraint(
+            "panchayat_id", "booth_number", name="uq_booths_panchayat_number"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    panchayat_id: Mapped[int] = mapped_column(
+        ForeignKey("panchayats.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    booth_number: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    address: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    panchayat: Mapped[Panchayat] = relationship(back_populates="booths")
+    voters: Mapped[list["Voter"]] = relationship(
+        back_populates="booth", passive_deletes="all"
+    )
+
+
+class Voter(Base):
+    __tablename__ = "voters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    booth_id: Mapped[int] = mapped_column(
+        ForeignKey("booths.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    electoral_roll_id: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    booth: Mapped[Booth] = relationship(back_populates="voters")
+
+
 class UserRegistration(BaseModel):
     email: EmailStr = Field(max_length=255)
     password: str = Field(min_length=8, max_length=128)
     role: Literal["admin", "field_worker"]
+    full_name: str = Field(min_length=2, max_length=150)
+    mobile_number: str = Field(min_length=10, max_length=16)
+    father_name: str = Field(min_length=2, max_length=150)
+    address: str = Field(min_length=5, max_length=2000)
+    qualification: str = Field(min_length=2, max_length=150)
+    nearby_location: str = Field(min_length=2, max_length=255)
 
     @field_validator("email", mode="before")
     @classmethod
     def normalize_email(cls, value: object) -> object:
         return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator(
+        "full_name",
+        "father_name",
+        "address",
+        "qualification",
+        "nearby_location",
+        mode="before",
+    )
+    @classmethod
+    def strip_profile_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("mobile_number", mode="before")
+    @classmethod
+    def normalize_indian_mobile_number(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().replace(" ", "").replace("-", "")
+        if normalized.startswith("+91"):
+            return normalized
+        return f"+91{normalized}"
+
+    @field_validator("mobile_number")
+    @classmethod
+    def validate_indian_mobile_number(cls, value: str) -> str:
+        if (
+            len(value) != 13
+            or not value.startswith("+91")
+            or value[3] not in "6789"
+            or not value[4:].isdigit()
+        ):
+            raise ValueError(
+                "mobile_number must be a valid Indian mobile number with an optional +91 prefix"
+            )
+        return value
 
 
 class UserResponse(BaseModel):
@@ -69,6 +197,12 @@ class UserResponse(BaseModel):
     email: str
     role: str
     created_at: datetime
+    full_name: str | None
+    mobile_number: str | None
+    father_name: str | None
+    address: str | None
+    qualification: str | None
+    nearby_location: str | None
 
 
 class UserLogin(BaseModel):
@@ -93,6 +227,127 @@ class AuthenticatedUserResponse(BaseModel):
     id: int
     email: str
     role: str
+    full_name: str | None
+    mobile_number: str | None
+    father_name: str | None
+    address: str | None
+    qualification: str | None
+    nearby_location: str | None
+
+
+class PanchayatCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=150)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class PanchayatUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=150)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("name cannot be empty")
+        return value.strip() if isinstance(value, str) else value
+
+
+class PanchayatResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    created_at: datetime
+
+
+class BoothCreate(BaseModel):
+    panchayat_id: int = Field(gt=0)
+    booth_number: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=150)
+    address: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("booth_number", "name", "address", mode="before")
+    @classmethod
+    def strip_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class BoothUpdate(BaseModel):
+    panchayat_id: int | None = Field(default=None, gt=0)
+    booth_number: str | None = Field(default=None, min_length=1, max_length=32)
+    name: str | None = Field(default=None, min_length=1, max_length=150)
+    address: str | None = Field(default=None, min_length=3, max_length=2000)
+
+    @field_validator("panchayat_id", "booth_number", "name", "address", mode="before")
+    @classmethod
+    def reject_null_and_strip_text(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("Updated fields cannot be null")
+        return value.strip() if isinstance(value, str) else value
+
+
+class BoothResponse(BaseModel):
+    id: int
+    panchayat_id: int
+    panchayat_name: str
+    booth_number: str
+    name: str
+    address: str
+    created_at: datetime
+
+
+class VoterCreate(BaseModel):
+    booth_id: int = Field(gt=0)
+    electoral_roll_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=2, max_length=150)
+
+    @field_validator("electoral_roll_id", mode="before")
+    @classmethod
+    def normalize_electoral_roll_id(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class VoterUpdate(BaseModel):
+    booth_id: int | None = Field(default=None, gt=0)
+    electoral_roll_id: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=2, max_length=150)
+
+    @field_validator("booth_id", "electoral_roll_id", "name", mode="before")
+    @classmethod
+    def reject_null_and_normalize(
+        cls, value: object, info: ValidationInfo
+    ) -> object:
+        if value is None:
+            raise ValueError("Updated fields cannot be null")
+        if isinstance(value, str):
+            value = value.strip()
+            return value.upper() if info.field_name == "electoral_roll_id" else value
+        return value
+
+
+class VoterResponse(BaseModel):
+    id: int
+    booth_id: int
+    booth_number: str
+    booth_name: str
+    panchayat_name: str
+    electoral_roll_id: str
+    name: str
+    created_at: datetime
+
+
+class AdminSummaryResponse(BaseModel):
+    panchayat_count: int
+    booth_count: int
+    voter_count: int
 
 
 password_hasher = PasswordHash.recommended()
@@ -170,6 +425,20 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Political-SAAS API", lifespan=lifespan)
+logger = logging.getLogger(__name__)
+
+
+@app.exception_handler(SQLAlchemyError)
+async def handle_database_error(request: Request, exc: SQLAlchemyError):
+    logger.error(
+        "Database request failed for %s",
+        request.url.path,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "A database error occurred. Check the server logs for details."},
+    )
 
 @app.get("/")
 def home():
@@ -214,6 +483,12 @@ async def register_user(
         email=registration.email,
         password_hash=password_hasher.hash(registration.password),
         role=registration.role,
+        full_name=registration.full_name,
+        mobile_number=registration.mobile_number,
+        father_name=registration.father_name,
+        address=registration.address,
+        qualification=registration.qualification,
+        nearby_location=registration.nearby_location,
     )
     session.add(user)
     try:
@@ -299,8 +574,438 @@ async def get_current_user(
     return user
 
 
+async def get_admin_user(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access is required")
+    return user
+
+
 @app.get("/auth/me", response_model=AuthenticatedUserResponse)
 async def get_authenticated_user(
     user: User = Depends(get_current_user),
 ):
-    return AuthenticatedUserResponse(id=user.id, email=user.email, role=user.role)
+    return AuthenticatedUserResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        full_name=user.full_name,
+        mobile_number=user.mobile_number,
+        father_name=user.father_name,
+        address=user.address,
+        qualification=user.qualification,
+        nearby_location=user.nearby_location,
+    )
+
+
+@app.get("/admin/summary", response_model=AdminSummaryResponse)
+async def get_admin_summary(
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    return AdminSummaryResponse(
+        panchayat_count=await session.scalar(select(func.count()).select_from(Panchayat)),
+        booth_count=await session.scalar(select(func.count()).select_from(Booth)),
+        voter_count=await session.scalar(select(func.count()).select_from(Voter)),
+    )
+
+
+@app.get("/workspace/panchayats", response_model=list[PanchayatResponse])
+async def list_workspace_panchayats(
+    _user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    return (await session.scalars(select(Panchayat).order_by(Panchayat.name))).all()
+
+
+@app.get("/workspace/booths", response_model=list[BoothResponse])
+async def list_workspace_booths(
+    _user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await session.execute(
+            select(Booth, Panchayat.name)
+            .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .order_by(Panchayat.name, Booth.booth_number)
+        )
+    ).all()
+    return [
+        BoothResponse(
+            id=booth.id,
+            panchayat_id=booth.panchayat_id,
+            panchayat_name=panchayat_name,
+            booth_number=booth.booth_number,
+            name=booth.name,
+            address=booth.address,
+            created_at=booth.created_at,
+        )
+        for booth, panchayat_name in rows
+    ]
+
+
+@app.get("/workspace/voters", response_model=list[VoterResponse])
+async def list_workspace_voters(
+    _user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await session.execute(
+            select(Voter, Booth.booth_number, Booth.name, Panchayat.name)
+            .join(Booth, Voter.booth_id == Booth.id)
+            .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .order_by(Voter.name)
+        )
+    ).all()
+    return [
+        VoterResponse(
+            id=voter.id,
+            booth_id=voter.booth_id,
+            booth_number=booth_number,
+            booth_name=booth_name,
+            panchayat_name=panchayat_name,
+            electoral_roll_id=voter.electoral_roll_id,
+            name=voter.name,
+            created_at=voter.created_at,
+        )
+        for voter, booth_number, booth_name, panchayat_name in rows
+    ]
+
+
+@app.get("/admin/panchayats", response_model=list[PanchayatResponse])
+async def list_panchayats(
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    return (await session.scalars(select(Panchayat).order_by(Panchayat.name))).all()
+
+
+@app.post(
+    "/admin/panchayats",
+    response_model=PanchayatResponse,
+    status_code=201,
+)
+async def create_panchayat(
+    record: PanchayatCreate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    panchayat = Panchayat(name=record.name)
+    session.add(panchayat)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="A Panchayat with that name already exists"
+        ) from exc
+    await session.refresh(panchayat)
+    return panchayat
+
+
+@app.patch("/admin/panchayats/{panchayat_id}", response_model=PanchayatResponse)
+async def update_panchayat(
+    panchayat_id: int,
+    changes: PanchayatUpdate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    panchayat = await session.get(Panchayat, panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=404, detail="Panchayat not found")
+    fields = changes.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="At least one field is required")
+    for field, value in fields.items():
+        setattr(panchayat, field, value)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="A Panchayat with that name already exists"
+        ) from exc
+    await session.refresh(panchayat)
+    return panchayat
+
+
+@app.delete("/admin/panchayats/{panchayat_id}", status_code=204)
+async def delete_panchayat(
+    panchayat_id: int,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    panchayat = await session.get(Panchayat, panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=404, detail="Panchayat not found")
+    booth_count = await session.scalar(
+        select(func.count(Booth.id)).where(Booth.panchayat_id == panchayat_id)
+    )
+    if booth_count:
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign or delete this Panchayat's booths before deleting it",
+        )
+    await session.delete(panchayat)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign or delete this Panchayat's booths before deleting it",
+        ) from exc
+
+
+@app.get("/admin/booths", response_model=list[BoothResponse])
+async def list_booths(
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await session.execute(
+            select(Booth, Panchayat.name)
+            .join(Panchayat)
+            .order_by(Panchayat.name, Booth.booth_number)
+        )
+    ).all()
+    return [
+        BoothResponse(
+            id=booth.id,
+            panchayat_id=booth.panchayat_id,
+            panchayat_name=panchayat_name,
+            booth_number=booth.booth_number,
+            name=booth.name,
+            address=booth.address,
+            created_at=booth.created_at,
+        )
+        for booth, panchayat_name in rows
+    ]
+
+
+@app.post("/admin/booths", response_model=BoothResponse, status_code=201)
+async def create_booth(
+    record: BoothCreate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    panchayat = await session.get(Panchayat, record.panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=404, detail="Panchayat not found")
+    booth = Booth(**record.model_dump())
+    session.add(booth)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="That booth number is already used in this Panchayat",
+        ) from exc
+    await session.refresh(booth)
+    return BoothResponse(
+        id=booth.id,
+        panchayat_id=booth.panchayat_id,
+        panchayat_name=panchayat.name,
+        booth_number=booth.booth_number,
+        name=booth.name,
+        address=booth.address,
+        created_at=booth.created_at,
+    )
+
+
+@app.patch("/admin/booths/{booth_id}", response_model=BoothResponse)
+async def update_booth(
+    booth_id: int,
+    changes: BoothUpdate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    booth = await session.get(Booth, booth_id)
+    if booth is None:
+        raise HTTPException(status_code=404, detail="Booth not found")
+    fields = changes.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="At least one field is required")
+    panchayat_id = fields.get("panchayat_id", booth.panchayat_id)
+    panchayat = await session.get(Panchayat, panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=404, detail="Panchayat not found")
+    for field, value in fields.items():
+        setattr(booth, field, value)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="That booth number is already used in this Panchayat",
+        ) from exc
+    await session.refresh(booth)
+    return BoothResponse(
+        id=booth.id,
+        panchayat_id=booth.panchayat_id,
+        panchayat_name=panchayat.name,
+        booth_number=booth.booth_number,
+        name=booth.name,
+        address=booth.address,
+        created_at=booth.created_at,
+    )
+
+
+@app.delete("/admin/booths/{booth_id}", status_code=204)
+async def delete_booth(
+    booth_id: int,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    booth = await session.get(Booth, booth_id)
+    if booth is None:
+        raise HTTPException(status_code=404, detail="Booth not found")
+    voter_count = await session.scalar(
+        select(func.count(Voter.id)).where(Voter.booth_id == booth_id)
+    )
+    if voter_count:
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign or delete this booth's voters before deleting it",
+        )
+    await session.delete(booth)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Reassign or delete this booth's voters before deleting it",
+        ) from exc
+
+
+@app.get("/admin/voters", response_model=list[VoterResponse])
+async def list_voters(
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await session.execute(
+            select(Voter, Booth.booth_number, Booth.name, Panchayat.name)
+            .join(Booth, Voter.booth_id == Booth.id)
+            .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .order_by(Voter.name)
+        )
+    ).all()
+    return [
+        VoterResponse(
+            id=voter.id,
+            booth_id=voter.booth_id,
+            booth_number=booth_number,
+            booth_name=booth_name,
+            panchayat_name=panchayat_name,
+            electoral_roll_id=voter.electoral_roll_id,
+            name=voter.name,
+            created_at=voter.created_at,
+        )
+        for voter, booth_number, booth_name, panchayat_name in rows
+    ]
+
+
+@app.post("/admin/voters", response_model=VoterResponse, status_code=201)
+async def create_voter(
+    record: VoterCreate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    booth = await session.get(Booth, record.booth_id)
+    if booth is None:
+        raise HTTPException(status_code=404, detail="Booth not found")
+    panchayat = await session.get(Panchayat, booth.panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=409, detail="Booth has no valid Panchayat")
+    voter = Voter(**record.model_dump())
+    session.add(voter)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="That electoral roll ID already exists"
+        ) from exc
+    await session.refresh(voter)
+    return VoterResponse(
+        id=voter.id,
+        booth_id=voter.booth_id,
+        booth_number=booth.booth_number,
+        booth_name=booth.name,
+        panchayat_name=panchayat.name,
+        electoral_roll_id=voter.electoral_roll_id,
+        name=voter.name,
+        created_at=voter.created_at,
+    )
+
+
+@app.patch("/admin/voters/{voter_id}", response_model=VoterResponse)
+async def update_voter(
+    voter_id: int,
+    changes: VoterUpdate,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    voter = await session.get(Voter, voter_id)
+    if voter is None:
+        raise HTTPException(status_code=404, detail="Voter not found")
+    fields = changes.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="At least one field is required")
+    booth_id = fields.get("booth_id", voter.booth_id)
+    booth = await session.get(Booth, booth_id)
+    if booth is None:
+        raise HTTPException(status_code=404, detail="Booth not found")
+    panchayat = await session.get(Panchayat, booth.panchayat_id)
+    if panchayat is None:
+        raise HTTPException(status_code=409, detail="Booth has no valid Panchayat")
+    for field, value in fields.items():
+        setattr(voter, field, value)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="That electoral roll ID already exists"
+        ) from exc
+    await session.refresh(voter)
+    return VoterResponse(
+        id=voter.id,
+        booth_id=voter.booth_id,
+        booth_number=booth.booth_number,
+        booth_name=booth.name,
+        panchayat_name=panchayat.name,
+        electoral_roll_id=voter.electoral_roll_id,
+        name=voter.name,
+        created_at=voter.created_at,
+    )
+
+
+@app.delete("/admin/voters/{voter_id}", status_code=204)
+async def delete_voter(
+    voter_id: int,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    voter = await session.get(Voter, voter_id)
+    if voter is None:
+        raise HTTPException(status_code=404, detail="Voter not found")
+    await session.delete(voter)
+    await session.commit()
+
+
+app = CORSMiddleware(
+    app=app,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)

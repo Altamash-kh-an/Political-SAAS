@@ -48,6 +48,16 @@ class FakeSession:
 
 
 class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
+    def profile_fields(self):
+        return {
+            "full_name": "Field Worker",
+            "mobile_number": "9876543210",
+            "father_name": "Parent Name",
+            "address": "12 Sample Road, Locality",
+            "qualification": "Graduate",
+            "nearby_location": "Central Market",
+        }
+
     def make_user(self, password="correct-password"):
         return main.User(
             id=10,
@@ -59,6 +69,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
     def test_registration_email_is_normalized_and_validated(self):
         request = main.UserRegistration(
             email="  PERSON@example.com ",
+            **self.profile_fields(),
             password="correct-password",
             role="field_worker",
         )
@@ -67,14 +78,46 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(email=email), self.assertRaises(ValidationError):
                 main.UserRegistration(
                     email=email,
+                    **self.profile_fields(),
                     password="correct-password",
                     role="field_worker",
+                )
+
+    def test_registration_normalizes_indian_mobile_number(self):
+        for mobile in ("9876543210", "+919876543210", "+91 9876543210"):
+            with self.subTest(mobile=mobile):
+                request = main.UserRegistration(
+                    email="person@example.com",
+                    password="long-enough-password",
+                    role="field_worker",
+                    mobile_number=mobile,
+                    full_name="Field Worker",
+                    father_name="Parent Name",
+                    address="12 Sample Road, Locality",
+                    qualification="Graduate",
+                    nearby_location="Central Market",
+                )
+                self.assertEqual(request.mobile_number, "+919876543210")
+
+        for mobile in ("1234567890", "987654321", "+9198765432101"):
+            with self.subTest(mobile=mobile), self.assertRaises(ValidationError):
+                main.UserRegistration(
+                    email="person@example.com",
+                    password="long-enough-password",
+                    role="field_worker",
+                    mobile_number=mobile,
+                    full_name="Field Worker",
+                    father_name="Parent Name",
+                    address="12 Sample Road, Locality",
+                    qualification="Graduate",
+                    nearby_location="Central Market",
                 )
 
     async def test_registration_stores_only_a_password_hash(self):
         session = FakeSession()
         request = main.UserRegistration(
             email="person@example.com",
+            **self.profile_fields(),
             password="correct-password",
             role="field_worker",
         )
@@ -92,6 +135,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSession()
         request = main.UserRegistration(
             email="admin@example.com",
+            **self.profile_fields(),
             password="correct-password",
             role="admin",
         )
@@ -106,6 +150,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSession(self.make_user())
         request = main.UserRegistration(
             email="person@example.com",
+            **self.profile_fields(),
             password="correct-password",
             role="field_worker",
         )
@@ -218,8 +263,38 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             response.model_dump(),
-            {"id": user.id, "email": user.email, "role": user.role},
+            {
+                "id": user.id,
+                "email": user.email,
+                "role": user.role,
+                "full_name": None,
+                "mobile_number": None,
+                "father_name": None,
+                "address": None,
+                "qualification": None,
+                "nearby_location": None,
+            },
         )
+
+    async def test_authenticated_profile_returns_safe_profile_fields(self):
+        user = self.make_user()
+        user.full_name = "Field Worker"
+        user.mobile_number = "+919876543210"
+        user.father_name = "Parent Name"
+        user.address = "12 Sample Road, Locality"
+        user.qualification = "Graduate"
+        user.nearby_location = "Central Market"
+
+        response = await main.get_authenticated_user(user)
+
+        self.assertEqual(response.full_name, user.full_name)
+        self.assertEqual(response.mobile_number, user.mobile_number)
+        self.assertEqual(response.father_name, user.father_name)
+        self.assertEqual(response.address, user.address)
+        self.assertEqual(response.qualification, user.qualification)
+        self.assertEqual(response.nearby_location, user.nearby_location)
+        self.assertNotIn("password_hash", response.model_dump())
+        self.assertNotIn("password", response.model_dump())
 
 
 if __name__ == "__main__":

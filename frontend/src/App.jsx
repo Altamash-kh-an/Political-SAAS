@@ -3,10 +3,13 @@ import {
   ArrowRight,
   Bell,
   Building2,
+  ChevronDown,
   ChevronRight,
+  CircleUserRound,
   ClipboardList,
   Home,
   LogIn,
+  LogOut,
   Map,
   MapPin,
   Menu,
@@ -15,6 +18,7 @@ import {
   Sparkles,
   Target,
   Users,
+  UserRound,
   Vote,
   X,
 } from "lucide-react";
@@ -27,6 +31,8 @@ import {
   summarizePanchayats,
 } from "./services/dashboardService";
 import { WorkspacePage } from "./WorkspacePages";
+import { adminRequest } from "./services/adminDataService";
+import { loadFieldWorkerRecords } from "./services/fieldWorkerService";
 import "./App.css";
 
 const pages = [
@@ -52,7 +58,16 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const [showSampleWorkspace, setShowSampleWorkspace] = useState(true);
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showProfileDetails, setShowProfileDetails] = useState(false);
+  const [showSampleWorkspace, setShowSampleWorkspace] = useState(false);
+  const [authSession, setAuthSession] = useState(null);
+  const [adminSummary, setAdminSummary] = useState(null);
+  const [adminSummaryLoading, setAdminSummaryLoading] = useState(false);
+  const [adminSummaryError, setAdminSummaryError] = useState("");
+  const [fieldWorkerRecords, setFieldWorkerRecords] = useState(null);
+  const [fieldWorkerLoading, setFieldWorkerLoading] = useState(false);
+  const [fieldWorkerError, setFieldWorkerError] = useState("");
   const searchInputRef = useRef(null);
   const summary = summarizePanchayats(dashboardData.panchayats);
 
@@ -68,8 +83,103 @@ function App() {
     return () => window.removeEventListener("keydown", focusSearch);
   }, []);
 
+  useEffect(() => {
+    if (!authSession) return undefined;
+
+    let expiresAt;
+    try {
+      const tokenPayload = authSession.accessToken.split(".")[1];
+      const normalizedPayload = tokenPayload.replace(/-/g, "+").replace(/_/g, "/");
+      const paddedPayload = normalizedPayload.padEnd(
+        Math.ceil(normalizedPayload.length / 4) * 4,
+        "="
+      );
+      const claims = JSON.parse(atob(paddedPayload));
+      expiresAt = Number.isFinite(claims.exp) ? claims.exp * 1000 : 0;
+    } catch {
+      expiresAt = 0;
+    }
+
+    const expirationTimer = window.setTimeout(() => {
+      setAuthSession(null);
+      setAdminSummary(null);
+      setAdminSummaryLoading(false);
+      setAdminSummaryError("");
+      setFieldWorkerRecords(null);
+      setFieldWorkerLoading(false);
+      setFieldWorkerError("");
+      setShowProfileMenu(false);
+      setShowProfileDetails(false);
+      setShowSampleWorkspace(false);
+    }, Math.max(0, expiresAt - Date.now()));
+
+    return () => window.clearTimeout(expirationTimer);
+  }, [authSession]);
+
+  useEffect(() => {
+    if (!authSession || authSession.user.role !== "field_worker") return undefined;
+
+    let active = true;
+    setFieldWorkerLoading(true);
+    setFieldWorkerError("");
+    loadFieldWorkerRecords(authSession.accessToken)
+      .then((records) => {
+        if (active) setFieldWorkerRecords(records);
+      })
+      .catch((error) => {
+        if (active) {
+          setFieldWorkerRecords(null);
+          setFieldWorkerError(error.message);
+        }
+      })
+      .finally(() => {
+        if (active) setFieldWorkerLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authSession]);
+
+  useEffect(() => {
+    if (!authSession || authSession.user.role !== "admin") return undefined;
+
+    let active = true;
+    adminRequest("/admin/summary", authSession.accessToken)
+      .then((summaryResult) => {
+        if (active) setAdminSummary(summaryResult);
+      })
+      .catch((error) => {
+        if (active) {
+          setAdminSummary(null);
+          setAdminSummaryError(error.message);
+        }
+      })
+      .finally(() => {
+        if (active) setAdminSummaryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authSession]);
+
   if (!showSampleWorkspace) {
-    return <LoginPage onPreviewWorkspace={returnToDashboard} />;
+    return (
+      <LoginPage
+        onPreviewWorkspace={returnToDashboard}
+        onLoginSuccess={(session) => {
+          setAuthSession(session);
+          setAdminSummary(null);
+          setAdminSummaryLoading(session.user.role === "admin");
+          setAdminSummaryError("");
+          setFieldWorkerRecords(null);
+          setFieldWorkerLoading(session.user.role === "field_worker");
+          setFieldWorkerError("");
+          returnToDashboard();
+        }}
+      />
+    );
   }
 
   const filteredPanchayats = filterRecordsBySearch(
@@ -95,10 +205,37 @@ function App() {
     setShowNotifications(false);
   }
 
+  function logout() {
+    setAuthSession(null);
+    setAdminSummary(null);
+    setAdminSummaryLoading(false);
+    setAdminSummaryError("");
+    setFieldWorkerRecords(null);
+    setFieldWorkerLoading(false);
+    setFieldWorkerError("");
+    setShowProfileMenu(false);
+    setShowProfileDetails(false);
+    setShowNotifications(false);
+    setShowSampleWorkspace(false);
+  }
+
   function returnToDashboard() {
     setActivePage("Dashboard");
     setSearch("");
     setShowSampleWorkspace(true);
+  }
+
+  async function refreshAdminSummary() {
+    if (!authSession || authSession.user.role !== "admin") return;
+    setAdminSummaryLoading(true);
+    setAdminSummaryError("");
+    try {
+      setAdminSummary(await adminRequest("/admin/summary", authSession.accessToken));
+    } catch (error) {
+      setAdminSummaryError(error.message);
+    } finally {
+      setAdminSummaryLoading(false);
+    }
   }
 
   function toggleSidebar() {
@@ -123,7 +260,16 @@ function App() {
       onSearchChange={setSearch}
       onActivityPeriodChange={setActivityPeriod}
       onNavigate={navigate}
-      onLogin={openLogin}
+      isAdmin={authSession?.user.role === "admin"}
+      accessToken={authSession?.accessToken}
+      adminSummary={adminSummary}
+      adminSummaryLoading={adminSummaryLoading}
+      adminSummaryError={adminSummaryError}
+      onAdminRecordsChanged={refreshAdminSummary}
+      isFieldWorker={authSession?.user.role === "field_worker"}
+      fieldWorkerRecords={fieldWorkerRecords}
+      fieldWorkerLoading={fieldWorkerLoading}
+      fieldWorkerError={fieldWorkerError}
     />
   );
 
@@ -150,7 +296,9 @@ function App() {
           <div className="constituency-symbol"><MapPin size={19} /></div>
           <div className="constituency-copy">
             <small>ACTIVE CONSTITUENCY</small>
-            <strong>{dashboardData.constituency.name}, {dashboardData.constituency.state}</strong>
+            <strong>{authSession?.user.role === "field_worker"
+              ? "Shared database"
+              : `${dashboardData.constituency.name}, ${dashboardData.constituency.state}`}</strong>
           </div>
         </div>
 
@@ -178,15 +326,18 @@ function App() {
         <div className="sidebar-bottom">
           <div className="help-card">
             <div className="help-icon"><Sparkles size={18} /></div>
-            <strong>Sample-data workspace</strong>
-            <p>Dashboard totals reflect available mock records.</p>
+            <strong>{authSession ? "Live database workspace" : "Sample-data workspace"}</strong>
+            <p>{authSession ? "Dashboard totals reflect saved database records." : "Preview totals reflect available mock records."}</p>
             <button onClick={() => navigate("AI Insights")}>
               View insights <ArrowRight size={15} />
             </button>
           </div>
           <div className="sidebar-user">
-            <div className="avatar">DK</div>
-            <div className="user-copy"><strong>Dashboard Admin</strong><small>Administrator</small></div>
+            <div className="avatar">{authSession ? (authSession.user.full_name || authSession.user.email)[0].toUpperCase() : "DK"}</div>
+            <div className="user-copy">
+              <strong>{authSession?.user.full_name || authSession?.user.email || "Dashboard Admin"}</strong>
+              <small>{authSession ? (authSession.user.role === "field_worker" ? "Field Worker" : "Administrator") : "Administrator"}</small>
+            </div>
           </div>
         </div>
       </aside>
@@ -223,14 +374,113 @@ function App() {
                 </div>
               )}
             </div>
-            <button className="button button-secondary topbar-login" type="button" onClick={openLogin}>
-              <LogIn size={15} /> Log in
-            </button>
+            {authSession ? (
+              <div className="profile-menu-wrap">
+                <button
+                  className="icon-button profile-menu-trigger"
+                  type="button"
+                  aria-label="Open profile menu"
+                  aria-haspopup="menu"
+                  aria-expanded={showProfileMenu}
+                  onClick={() => setShowProfileMenu((visible) => !visible)}
+                >
+                  <CircleUserRound size={19} />
+                  <ChevronDown size={14} />
+                </button>
+                {showProfileMenu && (
+                  <div className="profile-dropdown" role="menu">
+                    <div className="profile-dropdown-user">
+                      <strong>{authSession.user.full_name || "Not provided"}</strong>
+                      <small>{authSession.user.email}</small>
+                      <small>{authSession.user.role === "field_worker" ? "Field Worker" : "Administrator"}</small>
+                    </div>
+                    <dl className="profile-dropdown-details">
+                      {[
+                        ["Mobile", authSession.user.mobile_number],
+                        ["Father", authSession.user.father_name],
+                        ["Address", authSession.user.address],
+                        ["Qualification", authSession.user.qualification],
+                        ["Nearby", authSession.user.nearby_location],
+                      ].map(([label, value]) => (
+                        <div key={label}>
+                          <dt>{label}</dt>
+                          <dd>{value || "Not provided"}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setShowProfileMenu(false);
+                        setShowProfileDetails(true);
+                      }}
+                    >
+                      <UserRound size={16} /> My Profile
+                    </button>
+                    <button type="button" role="menuitem" onClick={logout}>
+                      <LogOut size={16} /> Logout
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button className="button button-secondary topbar-login" type="button" onClick={openLogin}>
+                <LogIn size={15} /> Log in
+              </button>
+            )}
           </div>
         </header>
 
         <div className="page-content">{pageContent}</div>
       </main>
+      {showProfileDetails && authSession && (
+        <div
+          className="profile-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowProfileDetails(false);
+          }}
+        >
+          <section
+            className="profile-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="profile-modal-title"
+          >
+            <div className="profile-modal-heading">
+              <div>
+                <div className="eyebrow">ACCOUNT PROFILE</div>
+                <h2 id="profile-modal-title">My Profile</h2>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Close profile"
+                onClick={() => setShowProfileDetails(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <dl className="profile-details-list">
+              {[
+                ["Full name", authSession.user.full_name],
+                ["Email", authSession.user.email],
+                ["Mobile number", authSession.user.mobile_number],
+                ["Father's name", authSession.user.father_name],
+                ["Complete address", authSession.user.address],
+                ["Qualification", authSession.user.qualification],
+                ["Nearby location / landmark", authSession.user.nearby_location],
+                ["Role", authSession.user.role === "field_worker" ? "Field Worker" : "Administrator"],
+              ].map(([label, value]) => (
+                <div className="profile-detail" key={label}>
+                  <dt>{label}</dt>
+                  <dd>{value || "Not provided"}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

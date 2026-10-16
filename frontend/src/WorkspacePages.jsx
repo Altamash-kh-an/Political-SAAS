@@ -7,7 +7,6 @@ import {
   CircleAlert,
   FileText,
   Lightbulb,
-  LogIn,
   MapPin,
   MessageSquare,
   ShieldCheck,
@@ -18,6 +17,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { filterRecordsBySearch, formatRelativeTime } from "./services/dashboardService";
+import AdminDataManagement from "./AdminDataManagement";
 
 const activityIcons = {
   report: FileText,
@@ -121,10 +121,10 @@ function ActivityList({ records, emptyMessage }) {
   );
 }
 
-function StatCard({ label, value, note, icon: Icon, color }) {
+function StatCard({ label, value, note, icon: Icon, color, sourceTag = "SAMPLE" }) {
   return (
     <article className="stat-card">
-      <div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={20} /></div><span className="sample-tag">SAMPLE</span></div>
+      <div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={20} /></div><span className="sample-tag">{sourceTag}</span></div>
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
       <div className="stat-foot"><span>{note}</span></div>
@@ -261,59 +261,249 @@ function Dashboard({ data, summary, panchayats, activities, onNavigate, onClearS
   );
 }
 
-function ElectionOverview({ summary }) {
+function AdminDashboard({ data, summary, isLoading, error, onNavigate }) {
+  const metrics = [
+    { label: "Panchayats", key: "panchayat_count", icon: Building2, color: "green" },
+    { label: "Booths", key: "booth_count", icon: Vote, color: "blue" },
+    { label: "Voters", key: "voter_count", icon: Users, color: "purple" },
+  ];
+
   return (
     <>
-      <PageHeading eyebrow="WORKSPACE" title="Election Overview" description="Election-specific results are not part of the available sample data." />
+      <PageHeading
+        eyebrow="LIVE DATABASE"
+        title={`${data.constituency.name} Dashboard`}
+        description="Totals are calculated from the Panchayat, Booth, and Voter records in your database."
+      >
+        <span className="sample-badge admin-live-badge"><span /> DATABASE</span>
+      </PageHeading>
+      <section className="stats-grid admin-dashboard-stats">
+        {metrics.map(({ label, key, icon: Icon, color }) => (
+          <article className="stat-card" key={key}>
+            <div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={20} /></div><span className="admin-count-tag">LIVE</span></div>
+            <div className="stat-value">{isLoading ? "…" : summary ? numberFormat.format(summary[key]) : "—"}</div>
+            <div className="stat-label">{label}</div>
+            <div className="stat-foot"><span>Database records</span></div>
+          </article>
+        ))}
+      </section>
+      {error && <p className="admin-error" role="alert">{error}</p>}
+      <Panel title="Manage constituency records" eyebrow="ADMIN ONLY">
+        <p className="admin-dashboard-copy">
+          Add and maintain verified Panchayat, Booth, and Voter records. Changes are saved directly to the database.
+        </p>
+        <div className="admin-dashboard-actions">
+          <button className="button button-secondary" onClick={() => onNavigate("Panchayats")}>Manage Panchayats</button>
+          <button className="button button-secondary" onClick={() => onNavigate("Booth Management")}>Manage Booths</button>
+          <button className="button button-secondary" onClick={() => onNavigate("Voter Insights")}>Manage Voters</button>
+        </div>
+      </Panel>
+    </>
+  );
+}
+
+function getFieldWorkerSummary(records) {
+  const boothCounts = new Map();
+  const boothPanchayatIds = new Map();
+  for (const booth of records?.booths ?? []) {
+    boothCounts.set(booth.panchayat_id, (boothCounts.get(booth.panchayat_id) ?? 0) + 1);
+    boothPanchayatIds.set(booth.id, booth.panchayat_id);
+  }
+
+  const voterCounts = new Map();
+  for (const voter of records?.voters ?? []) {
+    const panchayatId = boothPanchayatIds.get(voter.booth_id);
+    if (panchayatId !== undefined) {
+      voterCounts.set(panchayatId, (voterCounts.get(panchayatId) ?? 0) + 1);
+    }
+  }
+
+  const panchayats = (records?.panchayats ?? []).map((panchayat) => ({
+    ...panchayat,
+    booth_count: boothCounts.get(panchayat.id) ?? 0,
+    voter_count: voterCounts.get(panchayat.id) ?? 0,
+  }));
+
+  return {
+    panchayats,
+    panchayatCount: panchayats.length,
+    boothCount: records?.booths?.length ?? 0,
+    voterCount: records?.voters?.length ?? 0,
+  };
+}
+
+function FieldWorkerPanchayatTable({ records, onClearSearch, search = "" }) {
+  return records.length ? (
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>PANCHAYAT</th><th>BOOTHS</th><th>VOTERS</th><th>ADDED</th></tr></thead>
+          <tbody>
+            {records.map((record) => (
+              <tr key={record.id}>
+                <td><div className="panchayat-name"><span className="panchayat-avatar">{record.name.charAt(0)}</span><strong>{record.name}</strong></div></td>
+                <td>{numberFormat.format(record.booth_count)}</td>
+                <td>{numberFormat.format(record.voter_count)}</td>
+                <td>{new Date(record.created_at).toLocaleDateString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="table-footer">
+        <span>{numberFormat.format(records.length)} database Panchayat record{records.length === 1 ? "" : "s"}</span>
+        {search && onClearSearch && <button onClick={onClearSearch}>Clear search <ArrowRight size={14} /></button>}
+      </div>
+    </>
+  ) : <EmptyState title="No Panchayat records">{search ? "No Panchayat records match this search." : "Admin-managed Panchayat records will appear here when available."}</EmptyState>;
+}
+
+function FieldWorkerDashboard({ data, records, summary, loading, error, search, onNavigate, onClearSearch }) {
+  const panchayats = filterRecordsBySearch(summary.panchayats, search, ["name", "booth_count", "voter_count"]);
+  const metrics = [
+    ["Panchayats", summary.panchayatCount, Building2, "green"],
+    ["Booths", summary.boothCount, Vote, "blue"],
+    ["Voters", summary.voterCount, Users, "purple"],
+  ];
+  const maximumBoothCount = Math.max(1, ...summary.panchayats.map(({ booth_count }) => booth_count));
+  return (
+    <>
+      <h1 className="welcome-heading"><span>Welcome to Nathnagar Constituency</span></h1>
+      <AskAI constituencyName={data.constituency.name} />
+      <PageHeading
+        eyebrow="CONSTITUENCY INTELLIGENCE"
+        title={`${data.constituency.name} Dashboard`}
+        description="A live view of Panchayat, Booth, and Voter records maintained by an Admin."
+      >
+        <span className="sample-badge admin-live-badge"><span /> LIVE DATABASE</span>
+      </PageHeading>
+
+      <section className="hero-banner dashboard-hero">
+        <div className="hero-grid" />
+        <div className="hero-content">
+          <div className="hero-label"><span className="hero-label-dot" /> WORKSPACE OVERVIEW</div>
+          <h2>Local records.<br /><span>Clearer decisions.</span></h2>
+          <p>Review Admin-managed constituency records and navigate to read-only workspace pages.</p>
+          <div className="hero-meta">
+            <span><MapPin size={15} /> {data.constituency.name}, {data.constituency.district}, {data.constituency.state}</span>
+            <span><Building2 size={15} /> {summary.panchayatCount} database Panchayat records</span>
+          </div>
+        </div>
+        <div className="hero-visual" aria-hidden="true">
+          <div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="orbit orbit-three" />
+          <div className="hero-pin"><MapPin size={30} /></div>
+          <div className="hero-floating hero-floating-top"><Activity size={16} /><span><b>Available records</b><small>Shared database</small></span></div>
+          <div className="hero-floating hero-floating-bottom"><Target size={17} /><span><b>Panchayat coverage</b><small>Calculated from records</small></span></div>
+        </div>
+      </section>
+
+      <section className="stats-grid dashboard-stats">
+        {metrics.map(([label, value, icon, color]) => (
+          <StatCard key={label} label={label} value={loading ? "…" : error ? "—" : numberFormat.format(value)} note="Database records" icon={icon} color={color} sourceTag="LIVE" />
+        ))}
+      </section>
+      {error && <p className="admin-error" role="alert">{error}</p>}
+      {loading ? <p className="admin-loading" role="status">Loading database records...</p> : !error && (
+        <>
+          <section className="workspace-grid dashboard-panels">
+            <Panel title="Panchayat coverage" eyebrow="LIVE DATABASE" action={<button className="text-action" onClick={() => onNavigate("Panchayats")}>All Panchayats <ArrowRight size={15} /></button>}>
+              {summary.panchayats.length ? (
+                <div className="status-chart">
+                  {summary.panchayats.slice(0, 5).map((panchayat) => (
+                    <div className="status-chart-row" key={panchayat.id}>
+                      <div className="status-chart-label"><span>{panchayat.name}</span><strong>{numberFormat.format(panchayat.booth_count)} booths</strong></div>
+                      <div className="status-chart-track"><span className="status-chart-fill strong-fill" style={{ width: `${(panchayat.booth_count / maximumBoothCount) * 100}%` }} /></div>
+                    </div>
+                  ))}
+                </div>
+              ) : <EmptyState title="No Panchayat records">Admin-managed records will appear here when available.</EmptyState>}
+              <DataNote>Booth coverage is calculated from Booth records assigned to each Panchayat.</DataNote>
+            </Panel>
+
+            <Panel title="Recent activity" eyebrow="FIELD ACTIVITY">
+              <EmptyState title="No activity records connected">Field activity records are not stored in the current database.</EmptyState>
+            </Panel>
+          </section>
+
+          <Panel title="Panchayat directory preview" eyebrow="LOCAL ADMINISTRATION" action={<button className="text-action" onClick={() => onNavigate("Panchayats")}>Open directory <ArrowRight size={15} /></button>}>
+            <FieldWorkerPanchayatTable records={panchayats.slice(0, 4)} onClearSearch={onClearSearch} search={search} />
+          </Panel>
+        </>
+      )}
+    </>
+  );
+}
+
+function ElectionOverview({ summary, isFieldWorker = false }) {
+  return (
+    <>
+      <PageHeading eyebrow="WORKSPACE" title="Election Overview" description="Election results are not available because this database has no election-result records." />
       <Panel title="Election metrics unavailable" eyebrow="NO VERIFIED ELECTION DATA">
         <EmptyState title="No election records connected">Turnout, election-year comparisons, vote totals, and coverage metrics require verified election and booth records. They are intentionally not estimated from Panchayat aggregates.</EmptyState>
       </Panel>
       <div className="workspace-grid">
-        <Panel title="Available local coverage" eyebrow="SAMPLE ONLY">
+        <Panel title="Available local coverage" eyebrow={isFieldWorker ? "LIVE DATABASE" : "SAMPLE ONLY"}>
           <div className="metric-list">
             <Metric icon={Building2} label="Panchayat records" value={numberFormat.format(summary.panchayatCount)} />
-            <Metric icon={Vote} label="Booths represented in sample" value={numberFormat.format(summary.boothCount)} />
+            <Metric icon={Vote} label={isFieldWorker ? "Booth records" : "Booths represented in sample"} value={numberFormat.format(summary.boothCount)} />
           </div>
-          <DataNote>These are aggregated from sample Panchayat records and do not describe an election result.</DataNote>
+          <DataNote>{isFieldWorker ? "Counts come from authenticated read-only database records." : "These are aggregated from sample Panchayat records and do not describe an election result."}</DataNote>
         </Panel>
       </div>
     </>
   );
 }
 
-function BoothManagement({ summary }) {
+function BoothManagement({ summary, records = [], loading = false, error = "" }) {
   return (
     <>
-      <PageHeading eyebrow="WORKSPACE" title="Booth Management" description="Manage individual booth assignments and verification when booth-level records are available." />
-      <Panel title="Booth records are not available" eyebrow="DATA SOURCE REQUIRED">
-        <EmptyState title="No individual booths to display">The current sample only has booth counts attached to Panchayat records. Booth-level identifiers, status, assignments, and visit records require their own data source.</EmptyState>
-        <DataNote>{numberFormat.format(summary.boothCount)} booths are represented by aggregate sample counts only; they are not individual booth records.</DataNote>
+      <PageHeading eyebrow="WORKSPACE" title="Booth Management" description="Browse Booth records maintained by an Admin. This view is read-only." />
+      <Panel title="Booth directory" eyebrow={`${numberFormat.format(summary.boothCount)} DATABASE RECORDS`}>
+        {error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading Booth records...</p> : records.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>BOOTH NUMBER</th><th>BOOTH</th><th>PANCHAYAT</th><th>ADDRESS</th></tr></thead>
+              <tbody>{records.map((record) => <tr key={record.id}><td>{record.booth_number}</td><td>{record.name}</td><td>{record.panchayat_name}</td><td>{record.address}</td></tr>)}</tbody>
+            </table>
+          </div>
+        ) : <EmptyState title="No Booth records">Admin-managed Booth records will appear here when available.</EmptyState>}
       </Panel>
     </>
   );
 }
 
-function PanchayatsPage({ records, totalCount, onClearSearch }) {
+function PanchayatsPage({ records, totalCount, onClearSearch, isFieldWorker = false, loading = false, error = "", search = "" }) {
   return (
     <>
-      <PageHeading eyebrow="WORKSPACE" title="Panchayats" description="Browse and search the Panchayat records available for this constituency." />
-      <Panel title="Panchayat directory" eyebrow={`${totalCount} SAMPLE RECORDS`}>
-        <PanchayatTable records={records} totalCount={totalCount} onClearSearch={onClearSearch} />
+      <PageHeading eyebrow="WORKSPACE" title="Panchayats" description="Browse and search Admin-managed Panchayat records." />
+      <Panel title="Panchayat directory" eyebrow={`${totalCount} ${isFieldWorker ? "DATABASE" : "SAMPLE"} RECORDS`}>
+        {isFieldWorker
+          ? error ? <p className="admin-error" role="alert">{error}</p>
+            : loading ? <p className="admin-loading" role="status">Loading Panchayat records...</p>
+            : <FieldWorkerPanchayatTable records={records} onClearSearch={onClearSearch} search={search} />
+          : <PanchayatTable records={records} totalCount={totalCount} onClearSearch={onClearSearch} />}
       </Panel>
     </>
   );
 }
 
-function VoterInsights({ summary }) {
+function VoterInsights({ summary, records = [], loading = false, error = "", isFieldWorker = false }) {
   return (
     <>
-      <PageHeading eyebrow="WORKSPACE" title="Voter Insights" description="Sample voter counts are aggregated by Panchayat; no individual voter records are connected." />
+      <PageHeading eyebrow="WORKSPACE" title="Voter Insights" description={isFieldWorker ? "Browse individual voter records maintained by an Admin. This view is read-only." : "Sample voter counts are aggregated by Panchayat; no individual voter records are connected."} />
       <section className="stats-grid page-stats">
-        <StatCard label="Voters in sample" value={numberFormat.format(summary.voterCount)} note="Across sample Panchayats" icon={Users} color="purple" />
-        <StatCard label="Panchayats represented" value={numberFormat.format(summary.panchayatCount)} note="Sample records only" icon={Building2} color="green" />
+        <StatCard label={isFieldWorker ? "Voters" : "Voters in sample"} value={numberFormat.format(summary.voterCount)} note={isFieldWorker ? "Database records" : "Across sample Panchayats"} icon={Users} color="purple" sourceTag={isFieldWorker ? "LIVE" : "SAMPLE"} />
+        <StatCard label="Panchayats represented" value={numberFormat.format(summary.panchayatCount)} note={isFieldWorker ? "Database records" : "Sample records only"} icon={Building2} color="green" sourceTag={isFieldWorker ? "LIVE" : "SAMPLE"} />
       </section>
-      <Panel title="No voter-level insights yet" eyebrow="VOTER RECORDS REQUIRED">
-        <EmptyState title="Individual voter data is unavailable">Demographic breakdowns, turnout patterns, and voter-level search should be connected to verified, appropriately protected data before they are shown.</EmptyState>
+      <Panel title={isFieldWorker ? "Voter records" : "No voter-level insights yet"} eyebrow={isFieldWorker ? "READ ONLY" : "VOTER RECORDS REQUIRED"}>
+        {isFieldWorker ? (error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading Voter records...</p> : records.length ? (
+          <div className="table-wrap"><table>
+            <thead><tr><th>VOTER</th><th>ELECTORAL ROLL ID</th><th>BOOTH</th><th>PANCHAYAT</th></tr></thead>
+            <tbody>{records.map((record) => <tr key={record.id}><td>{record.name}</td><td>{record.electoral_roll_id}</td><td>{record.booth_number} · {record.booth_name}</td><td>{record.panchayat_name}</td></tr>)}</tbody>
+          </table></div>
+        ) : <EmptyState title="No Voter records">Admin-managed Voter records will appear here when available.</EmptyState>) : (
+          <EmptyState title="Individual voter data is unavailable">Demographic breakdowns, turnout patterns, and voter-level search should be connected to verified, appropriately protected data before they are shown.</EmptyState>
+        )}
       </Panel>
     </>
   );
@@ -398,28 +588,67 @@ function Insights({ summary }) {
   );
 }
 
-function SettingsPage({ data, onLogin }) {
+function SettingsPage({ data }) {
   return (
     <>
       <PageHeading eyebrow="ACCOUNT" title="Settings" description="Workspace information for this local demo." />
       <Panel title="Workspace configuration" eyebrow="READ-ONLY DEMO">
         <div className="settings-list">
-          <Metric icon={MapPin} label="Active constituency" value={`${data.constituency.name}, ${data.constituency.state}`} />
+          <Metric icon={MapPin} label="Active constituency" value="Not configured" />
           <Metric icon={Building2} label="Data source" value="Local sample records" />
           <Metric icon={Activity} label="Backend connection" value="Not configured" />
         </div>
-        <DataNote>Account, notification, and constituency settings are not persisted because no backend or user preference store is available.</DataNote>
+        <DataNote>Workspace settings are read-only in this sample-data view.</DataNote>
       </Panel>
-      <Panel
-        title="Account access"
-        eyebrow="AUTHENTICATION"
-        action={
-          <button className="button button-secondary" type="button" onClick={onLogin}>
-            <LogIn size={15} /> Log in
-          </button>
-        }
-      >
-        <DataNote>Authentication is not configured. You can open the login screen and return to the sample dashboard without signing in.</DataNote>
+    </>
+  );
+}
+
+function FieldWorkerMap({ records, loading, error }) {
+  return (
+    <>
+      <PageHeading eyebrow="INTELLIGENCE" title="Constituency Map" description="A map needs verified location coordinates, which are not part of the current database records." />
+      <Panel title="Panchayat locations" eyebrow="LOCATION DATA REQUIRED">
+        {error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading Panchayat records...</p> : records.length ? (
+          <>
+            <EmptyState title="Map locations are not configured">Panchayat names and records are available, but no coordinates are stored. No approximate or sample map positions are shown.</EmptyState>
+            <ul>{records.map(({ id, name }) => <li key={id}>{name}</li>)}</ul>
+          </>
+        ) : <EmptyState title="No Panchayat records">Admin-managed Panchayat records will appear here when available.</EmptyState>}
+      </Panel>
+    </>
+  );
+}
+
+function FieldWorkerInsights({ summary, loading, error }) {
+  return (
+    <>
+      <PageHeading eyebrow="INTELLIGENCE" title="Database Insights" description="Live descriptive counts from Admin-managed database records. No AI service is connected." />
+      <Panel title="Constituency record summary" eyebrow="LIVE DATABASE">
+        {error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading database records...</p> : (
+          <div className="metric-list">
+            <Metric icon={Building2} label="Panchayat records" value={numberFormat.format(summary.panchayatCount)} />
+            <Metric icon={Vote} label="Booth records" value={numberFormat.format(summary.boothCount)} />
+            <Metric icon={Users} label="Voter records" value={numberFormat.format(summary.voterCount)} />
+          </div>
+        )}
+        <DataNote>These counts describe stored records only; they do not imply election results or worker activity.</DataNote>
+      </Panel>
+    </>
+  );
+}
+
+function FieldWorkerSettings({ loading, error }) {
+  return (
+    <>
+      <PageHeading eyebrow="ACCOUNT" title="Settings" description="Read-only workspace information." />
+      <Panel title="Workspace configuration" eyebrow="READ ONLY">
+        <div className="settings-list">
+          <Metric icon={MapPin} label="Active constituency" value={`${data.constituency.name}, ${data.constituency.state}`} />
+          <Metric icon={Building2} label="Data source" value="Shared database records" />
+          <Metric icon={Activity} label="Backend connection" value={error ? "Unavailable" : loading ? "Connecting..." : "Connected"} />
+        </div>
+        {error && <p className="admin-error" role="alert">{error}</p>}
       </Panel>
     </>
   );
@@ -430,19 +659,87 @@ function Metric({ icon: Icon, label, value }) {
 }
 
 export function WorkspacePage(props) {
-  const { page, data, summary, panchayats, activities, search, activityPeriod, activityPeriods, onActivityPeriodChange, onNavigate, onSearchChange, onLogin } = props;
+  const {
+    page,
+    data,
+    summary,
+    panchayats,
+    activities,
+    search,
+    activityPeriod,
+    activityPeriods,
+    onActivityPeriodChange,
+    onNavigate,
+    onSearchChange,
+    isAdmin = false,
+    accessToken,
+    adminSummary,
+    adminSummaryLoading = false,
+    adminSummaryError = "",
+    onAdminRecordsChanged = () => {},
+    isFieldWorker = false,
+    fieldWorkerRecords = null,
+    fieldWorkerLoading = false,
+    fieldWorkerError = "",
+  } = props;
+  const fieldWorkerSummary = getFieldWorkerSummary(fieldWorkerRecords);
+  const fieldWorkerPanchayats = filterRecordsBySearch(
+    fieldWorkerSummary.panchayats,
+    search,
+    ["name", "booth_count", "voter_count"],
+  );
+  const fieldWorkerBooths = filterRecordsBySearch(
+    fieldWorkerRecords?.booths ?? [],
+    search,
+    ["booth_number", "name", "panchayat_name", "address"],
+  );
+  const fieldWorkerVoters = filterRecordsBySearch(
+    fieldWorkerRecords?.voters ?? [],
+    search,
+    ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name"],
+  );
   switch (page) {
-    case "Election Overview": return <ElectionOverview summary={summary} />;
-    case "Booth Management": return <BoothManagement summary={summary} />;
-    case "Panchayats": return <PanchayatsPage records={panchayats} totalCount={data.panchayats.length} onClearSearch={() => onSearchChange("")} />;
-    case "Voter Insights": return <VoterInsights summary={summary} />;
-    case "Constituency Map": return <ConstituencyMap data={data} search={search} panchayats={data.panchayats} />;
-    case "Issues & Reports": return <IssuesReports activities={activities} />;
-    case "Field Activities": return <FieldActivities activities={activities} activityPeriod={activityPeriod} activityPeriods={activityPeriods} onActivityPeriodChange={onActivityPeriodChange} />;
-    case "AI Insights": return <Insights summary={summary} />;
-    case "Settings": return <SettingsPage data={data} onLogin={onLogin} />;
+    case "Election Overview": return isFieldWorker
+      ? fieldWorkerError ? <p className="admin-error" role="alert">{fieldWorkerError}</p>
+        : fieldWorkerLoading ? <p className="admin-loading" role="status">Loading database records...</p>
+          : <ElectionOverview summary={fieldWorkerSummary} isFieldWorker />
+      : <ElectionOverview summary={summary} />;
+    case "Booth Management": return isAdmin
+      ? <AdminDataManagement page={page} accessToken={accessToken} search={search} onRecordsChanged={onAdminRecordsChanged} />
+      : isFieldWorker
+        ? <BoothManagement summary={fieldWorkerSummary} records={fieldWorkerBooths} loading={fieldWorkerLoading} error={fieldWorkerError} />
+        : <BoothManagement summary={summary} />;
+    case "Panchayats": return isAdmin
+      ? <AdminDataManagement page={page} accessToken={accessToken} search={search} onRecordsChanged={onAdminRecordsChanged} />
+      : isFieldWorker
+        ? <PanchayatsPage records={fieldWorkerPanchayats} totalCount={fieldWorkerSummary.panchayatCount} onClearSearch={() => onSearchChange("")} isFieldWorker loading={fieldWorkerLoading} error={fieldWorkerError} search={search} />
+        : <PanchayatsPage records={panchayats} totalCount={data.panchayats.length} onClearSearch={() => onSearchChange("")} />;
+    case "Voter Insights": return isAdmin
+      ? <AdminDataManagement page={page} accessToken={accessToken} search={search} onRecordsChanged={onAdminRecordsChanged} />
+      : isFieldWorker
+        ? <VoterInsights summary={fieldWorkerSummary} records={fieldWorkerVoters} loading={fieldWorkerLoading} error={fieldWorkerError} isFieldWorker />
+        : <VoterInsights summary={summary} />;
+    case "Constituency Map": return isFieldWorker
+      ? <FieldWorkerMap records={fieldWorkerPanchayats} loading={fieldWorkerLoading} error={fieldWorkerError} />
+      : <ConstituencyMap data={data} search={search} panchayats={data.panchayats} />;
+    case "Issues & Reports": return isFieldWorker
+      ? <Panel title="No issue records connected" eyebrow="DATA SOURCE REQUIRED"><EmptyState title="No issues or reports">This database does not contain issue or report records.</EmptyState></Panel>
+      : <IssuesReports activities={activities} />;
+    case "Field Activities": return isFieldWorker
+      ? <Panel title="No field activity records" eyebrow="DATA SOURCE REQUIRED"><EmptyState title="No activity records">This database does not contain field activity records.</EmptyState></Panel>
+      : <FieldActivities activities={activities} activityPeriod={activityPeriod} activityPeriods={activityPeriods} onActivityPeriodChange={onActivityPeriodChange} />;
+    case "AI Insights": return isFieldWorker
+      ? <FieldWorkerInsights summary={fieldWorkerSummary} loading={fieldWorkerLoading} error={fieldWorkerError} />
+      : <Insights summary={summary} />;
+    case "Settings": return isFieldWorker
+      ? <FieldWorkerSettings loading={fieldWorkerLoading} error={fieldWorkerError} />
+      : <SettingsPage data={data} />;
     case "Dashboard":
     default:
-      return <Dashboard data={data} summary={summary} panchayats={panchayats} activities={activities} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />;
+      return isAdmin
+        ? <AdminDashboard data={data} summary={adminSummary} isLoading={adminSummaryLoading} error={adminSummaryError} onNavigate={onNavigate} />
+        : isFieldWorker
+          ? <FieldWorkerDashboard data={data} records={fieldWorkerRecords} summary={fieldWorkerSummary} loading={fieldWorkerLoading} error={fieldWorkerError} search={search} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />
+          : <Dashboard data={data} summary={summary} panchayats={panchayats} activities={activities} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />;
   }
 }
