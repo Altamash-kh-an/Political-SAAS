@@ -32,7 +32,7 @@ import {
 } from "./services/dashboardService";
 import { WorkspacePage } from "./WorkspacePages";
 import { adminRequest } from "./services/adminDataService";
-import { loadFieldWorkerRecords } from "./services/fieldWorkerService";
+import { loadWorkspaceRecords } from "./services/fieldWorkerService";
 import "./App.css";
 
 const pages = [
@@ -65,9 +65,9 @@ function App() {
   const [adminSummary, setAdminSummary] = useState(null);
   const [adminSummaryLoading, setAdminSummaryLoading] = useState(false);
   const [adminSummaryError, setAdminSummaryError] = useState("");
-  const [fieldWorkerRecords, setFieldWorkerRecords] = useState(null);
-  const [fieldWorkerLoading, setFieldWorkerLoading] = useState(false);
-  const [fieldWorkerError, setFieldWorkerError] = useState("");
+  const [workspaceRecords, setWorkspaceRecords] = useState(null);
+  const [workspaceRecordsLoading, setWorkspaceRecordsLoading] = useState(false);
+  const [workspaceRecordsError, setWorkspaceRecordsError] = useState("");
   const searchInputRef = useRef(null);
   const summary = summarizePanchayats(dashboardData.panchayats);
 
@@ -105,9 +105,9 @@ function App() {
       setAdminSummary(null);
       setAdminSummaryLoading(false);
       setAdminSummaryError("");
-      setFieldWorkerRecords(null);
-      setFieldWorkerLoading(false);
-      setFieldWorkerError("");
+      setWorkspaceRecords(null);
+      setWorkspaceRecordsLoading(false);
+      setWorkspaceRecordsError("");
       setShowProfileMenu(false);
       setShowProfileDetails(false);
       setShowSampleWorkspace(false);
@@ -117,23 +117,21 @@ function App() {
   }, [authSession]);
 
   useEffect(() => {
-    if (!authSession || authSession.user.role !== "field_worker") return undefined;
+    if (!authSession) return undefined;
 
     let active = true;
-    setFieldWorkerLoading(true);
-    setFieldWorkerError("");
-    loadFieldWorkerRecords(authSession.accessToken)
+    loadWorkspaceRecords(authSession.accessToken)
       .then((records) => {
-        if (active) setFieldWorkerRecords(records);
+        if (active) setWorkspaceRecords(records);
       })
       .catch((error) => {
         if (active) {
-          setFieldWorkerRecords(null);
-          setFieldWorkerError(error.message);
+          setWorkspaceRecords(null);
+          setWorkspaceRecordsError(error.message);
         }
       })
       .finally(() => {
-        if (active) setFieldWorkerLoading(false);
+        if (active) setWorkspaceRecordsLoading(false);
       });
 
     return () => {
@@ -173,9 +171,9 @@ function App() {
           setAdminSummary(null);
           setAdminSummaryLoading(session.user.role === "admin");
           setAdminSummaryError("");
-          setFieldWorkerRecords(null);
-          setFieldWorkerLoading(session.user.role === "field_worker");
-          setFieldWorkerError("");
+          setWorkspaceRecords(null);
+          setWorkspaceRecordsLoading(true);
+          setWorkspaceRecordsError("");
           returnToDashboard();
         }}
       />
@@ -192,11 +190,57 @@ function App() {
     search,
     activityPeriod
   );
+  const searchResults = search.trim()
+    ? [
+        ...filterRecordsBySearch(
+          authSession ? workspaceRecords?.panchayats ?? [] : dashboardData.panchayats,
+          search,
+          ["name"]
+        ).map((record) => ({
+          page: "Panchayats",
+          query: record.name,
+          value: record.id
+            ? `Panchayat · ${record.name} (#${record.id})`
+            : `Panchayat · ${record.name}`,
+        })),
+        ...(authSession ? filterRecordsBySearch(
+          workspaceRecords?.booths ?? [],
+          search,
+          ["booth_number", "name", "panchayat_name", "address"]
+        ).map((record) => ({
+          page: "Booth Management",
+          query: record.booth_number,
+          value: `Booth · ${record.booth_number} · ${record.name} (#${record.id})`,
+        })) : []),
+        ...(authSession ? filterRecordsBySearch(
+          workspaceRecords?.voters ?? [],
+          search,
+          ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name"]
+        ).map((record) => ({
+          page: "Voter Insights",
+          query: record.electoral_roll_id,
+          value: `Voter · ${record.name} · ${record.electoral_roll_id} (#${record.id})`,
+        })) : []),
+      ]
+    : [];
 
   function navigate(label) {
     setActivePage(label);
     setSidebarOpen(false);
     setSearch("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function handleSearchChange(value) {
+    const result = searchResults.find(({ value: optionValue }) => optionValue === value);
+    if (!result) {
+      setSearch(value);
+      return;
+    }
+
+    setActivePage(result.page);
+    setSidebarOpen(false);
+    setSearch(result.query);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -210,9 +254,9 @@ function App() {
     setAdminSummary(null);
     setAdminSummaryLoading(false);
     setAdminSummaryError("");
-    setFieldWorkerRecords(null);
-    setFieldWorkerLoading(false);
-    setFieldWorkerError("");
+    setWorkspaceRecords(null);
+    setWorkspaceRecordsLoading(false);
+    setWorkspaceRecordsError("");
     setShowProfileMenu(false);
     setShowProfileDetails(false);
     setShowNotifications(false);
@@ -267,9 +311,9 @@ function App() {
       adminSummaryError={adminSummaryError}
       onAdminRecordsChanged={refreshAdminSummary}
       isFieldWorker={authSession?.user.role === "field_worker"}
-      fieldWorkerRecords={fieldWorkerRecords}
-      fieldWorkerLoading={fieldWorkerLoading}
-      fieldWorkerError={fieldWorkerError}
+      fieldWorkerRecords={workspaceRecords}
+      fieldWorkerLoading={workspaceRecordsLoading}
+      fieldWorkerError={workspaceRecordsError}
     />
   );
 
@@ -357,9 +401,15 @@ function App() {
                 ref={searchInputRef}
                 aria-label={`Search ${activePage}`}
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                onChange={(event) => handleSearchChange(event.target.value)}
+                list="workspace-search-results"
                 placeholder={activePage === "Panchayats" ? "Search Panchayats..." : "Search available records..."}
               />
+              <datalist id="workspace-search-results">
+                {searchResults.map((result) => (
+                  <option key={result.value} value={result.value} />
+                ))}
+              </datalist>
               {search && <button className="search-clear" type="button" onClick={() => setSearch("")} aria-label="Clear search"><X size={14} /></button>}
               <kbd>⌘ K</kbd>
             </label>

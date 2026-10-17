@@ -680,6 +680,25 @@ body {
   box-shadow: 0 0 0 3px #5888ef20;
 }
 
+.global-search input[list="workspace-search-results"] {
+  color-scheme: dark;
+}
+
+#workspace-search-results option {
+  padding: 9px 12px;
+  border: 1px solid #354969;
+  border-radius: 7px;
+  color: #dce7ff;
+  background: #121d30;
+  font-size: 12px;
+}
+
+#workspace-search-results option:hover,
+#workspace-search-results option:checked {
+  color: #fff;
+  background: linear-gradient(105deg, #233c65, #292d56);
+}
+
 .notification-popover {
   border-color: #354969;
   background: #121d30;

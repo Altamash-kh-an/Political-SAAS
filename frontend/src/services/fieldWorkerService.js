@@ -1,6 +1,6 @@
 import { adminRequest } from "./adminDataService";
 
-export async function loadFieldWorkerRecords(accessToken) {
+export async function loadWorkspaceRecords(accessToken) {
   const [panchayats, booths, voters] = await Promise.all([
     adminRequest("/workspace/panchayats", accessToken),
     adminRequest("/workspace/booths", accessToken),

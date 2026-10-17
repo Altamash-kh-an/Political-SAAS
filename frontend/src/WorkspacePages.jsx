@@ -737,7 +737,7 @@ export function WorkspacePage(props) {
     case "Dashboard":
     default:
       return isAdmin
-        ? <AdminDashboard data={data} summary={adminSummary} isLoading={adminSummaryLoading} error={adminSummaryError} onNavigate={onNavigate} />
+        ? <AdminDashboard data={data} summary={adminSummary} isLoading={adminSummaryLoading} error={[adminSummaryError, fieldWorkerError].filter(Boolean).join(" ")} onNavigate={onNavigate} />
         : isFieldWorker
           ? <FieldWorkerDashboard data={data} records={fieldWorkerRecords} summary={fieldWorkerSummary} loading={fieldWorkerLoading} error={fieldWorkerError} search={search} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />
           : <Dashboard data={data} summary={summary} panchayats={panchayats} activities={activities} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />;
