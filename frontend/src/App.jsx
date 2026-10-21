@@ -37,9 +37,10 @@ import "./App.css";
 
 const pages = [
   { label: "Dashboard", icon: Home, group: "WORKSPACE" },
+  { label: "Blocks", icon: Building2, group: "WORKSPACE" },
+  { label: "Panchayats", icon: MapPin, group: "WORKSPACE" },
   { label: "Election Overview", icon: Vote, group: "WORKSPACE" },
   { label: "Booth Management", icon: MapPin, group: "WORKSPACE" },
-  { label: "Panchayats", icon: Building2, group: "WORKSPACE" },
   { label: "Voter Insights", icon: Users, group: "WORKSPACE" },
   { label: "Constituency Map", icon: Map, group: "INTELLIGENCE" },
   { label: "Issues & Reports", icon: ClipboardList, group: "INTELLIGENCE" },
@@ -53,6 +54,8 @@ const { activityPeriods } = dashboardData;
 
 function App() {
   const [activePage, setActivePage] = useState("Dashboard");
+  const [selectedBlock, setSelectedBlock] = useState(null);
+  const [selectedPanchayat, setSelectedPanchayat] = useState(null);
   const [search, setSearch] = useState("");
   const [activityPeriod, setActivityPeriod] = useState("30d");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -195,7 +198,7 @@ function App() {
         ...filterRecordsBySearch(
           authSession ? workspaceRecords?.panchayats ?? [] : dashboardData.panchayats,
           search,
-          ["name"]
+          ["name", "block_name", "parent_block_name"]
         ).map((record) => ({
           page: "Panchayats",
           query: record.name,
@@ -206,7 +209,7 @@ function App() {
         ...(authSession ? filterRecordsBySearch(
           workspaceRecords?.booths ?? [],
           search,
-          ["booth_number", "name", "panchayat_name", "address"]
+          ["booth_number", "name", "panchayat_name", "block_name", "parent_block_name", "address"]
         ).map((record) => ({
           page: "Booth Management",
           query: record.booth_number,
@@ -215,7 +218,7 @@ function App() {
         ...(authSession ? filterRecordsBySearch(
           workspaceRecords?.voters ?? [],
           search,
-          ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name"]
+          ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name", "block_name", "parent_block_name"]
         ).map((record) => ({
           page: "Voter Insights",
           query: record.electoral_roll_id,
@@ -224,8 +227,10 @@ function App() {
       ]
     : [];
 
-  function navigate(label) {
+  function navigate(label, record = null) {
     setActivePage(label);
+    setSelectedBlock(label === "Block Details" ? record : label === "Panchayat Details" ? selectedBlock : null);
+    setSelectedPanchayat(label === "Panchayat Details" ? record : null);
     setSidebarOpen(false);
     setSearch("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -272,14 +277,27 @@ function App() {
   async function refreshAdminSummary() {
     if (!authSession || authSession.user.role !== "admin") return;
     setAdminSummaryLoading(true);
+    setWorkspaceRecordsLoading(true);
     setAdminSummaryError("");
-    try {
-      setAdminSummary(await adminRequest("/admin/summary", authSession.accessToken));
-    } catch (error) {
-      setAdminSummaryError(error.message);
-    } finally {
-      setAdminSummaryLoading(false);
+    setWorkspaceRecordsError("");
+    const [summaryResult, recordsResult] = await Promise.allSettled([
+      adminRequest("/admin/summary", authSession.accessToken),
+      loadWorkspaceRecords(authSession.accessToken),
+    ]);
+    if (summaryResult.status === "fulfilled") {
+      setAdminSummary(summaryResult.value);
+    } else {
+      setAdminSummary(null);
+      setAdminSummaryError(summaryResult.reason.message);
     }
+    if (recordsResult.status === "fulfilled") {
+      setWorkspaceRecords(recordsResult.value);
+    } else {
+      setWorkspaceRecords(null);
+      setWorkspaceRecordsError(recordsResult.reason.message);
+    }
+    setAdminSummaryLoading(false);
+    setWorkspaceRecordsLoading(false);
   }
 
   function toggleSidebar() {
@@ -290,10 +308,16 @@ function App() {
     }
   }
 
-  const currentPage = pages.find(({ label }) => label === activePage) ?? pages[0];
+  const currentPage = activePage === "Panchayat Details"
+    ? { label: selectedPanchayat?.name ?? "Panchayat Details" }
+    : activePage === "Block Details"
+    ? { label: selectedBlock?.display_name ?? selectedBlock?.name ?? "Block Details" }
+    : pages.find(({ label }) => label === activePage) ?? pages[0];
   const pageContent = (
     <WorkspacePage
       page={activePage}
+      selectedBlock={selectedBlock}
+      selectedPanchayat={selectedPanchayat}
       data={dashboardData}
       summary={summary}
       panchayats={filteredPanchayats}
@@ -353,14 +377,14 @@ function App() {
               {pages.filter((item) => item.group === group).map(({ label, icon: Icon }) => (
                 <button
                   key={label}
-                  className={`nav-link ${activePage === label ? "active" : ""}`}
+                  className={`nav-link ${activePage === label || ((activePage === "Block Details" || activePage === "Panchayat Details") && label === "Blocks") ? "active" : ""}`}
                   onClick={() => navigate(label)}
                   title={sidebarCollapsed ? label : undefined}
-                  aria-current={activePage === label ? "page" : undefined}
+                  aria-current={activePage === label || ((activePage === "Block Details" || activePage === "Panchayat Details") && label === "Blocks") ? "page" : undefined}
                 >
                   <Icon size={18} strokeWidth={1.8} />
                   <span>{label}</span>
-                  {activePage === label && <span className="active-marker" />}
+                  {(activePage === label || ((activePage === "Block Details" || activePage === "Panchayat Details") && label === "Blocks")) && <span className="active-marker" />}
                 </button>
               ))}
             </div>
@@ -403,7 +427,7 @@ function App() {
                 value={search}
                 onChange={(event) => handleSearchChange(event.target.value)}
                 list="workspace-search-results"
-                placeholder={activePage === "Panchayats" ? "Search Panchayats..." : "Search available records..."}
+                placeholder={activePage === "Blocks" ? "Search Blocks..." : activePage === "Block Details" ? "Search Panchayats..." : activePage === "Panchayats" ? "Search Panchayats..." : "Search available records..."}
               />
               <datalist id="workspace-search-results">
                 {searchResults.map((result) => (

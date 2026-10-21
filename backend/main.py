@@ -8,11 +8,11 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import (
     BaseModel,
@@ -45,12 +45,19 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
+    aliased,
     mapped_column,
     relationship,
     validates,
 )
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.responses import JSONResponse
+
+from booth_import import (
+    MAX_IMPORT_ROWS,
+    BoothImportFormatError,
+    parse_booth_import,
+)
 
 
 class Base(DeclarativeBase):
@@ -83,14 +90,38 @@ class User(Base):
         return value
 
 
+class Block(Base):
+    __tablename__ = "blocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("blocks.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    parent: Mapped["Block | None"] = relationship(
+        back_populates="children", remote_side="Block.id"
+    )
+    children: Mapped[list["Block"]] = relationship(back_populates="parent")
+    panchayats: Mapped[list["Panchayat"]] = relationship(
+        back_populates="block", passive_deletes="all"
+    )
+
+
 class Panchayat(Base):
     __tablename__ = "panchayats"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    block_id: Mapped[int | None] = mapped_column(
+        ForeignKey("blocks.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    block: Mapped[Block | None] = relationship(back_populates="panchayats")
     booths: Mapped[list["Booth"]] = relationship(
         back_populates="panchayat", passive_deletes="all"
     )
@@ -111,6 +142,7 @@ class Booth(Base):
     booth_number: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     address: Mapped[str] = mapped_column(Text, nullable=False)
+    village_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -237,6 +269,7 @@ class AuthenticatedUserResponse(BaseModel):
 
 class PanchayatCreate(BaseModel):
     name: str = Field(min_length=2, max_length=150)
+    block_id: int | None = Field(default=None, gt=0)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -246,6 +279,7 @@ class PanchayatCreate(BaseModel):
 
 class PanchayatUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=150)
+    block_id: int | None = Field(default=None, gt=0)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -260,6 +294,19 @@ class PanchayatResponse(BaseModel):
 
     id: int
     name: str
+    block_id: int | None
+    block_name: str | None
+    parent_block_id: int | None
+    parent_block_name: str | None
+    created_at: datetime
+
+
+class BlockResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    parent_id: int | None
     created_at: datetime
 
 
@@ -268,11 +315,19 @@ class BoothCreate(BaseModel):
     booth_number: str = Field(min_length=1, max_length=32)
     name: str = Field(min_length=1, max_length=150)
     address: str = Field(min_length=3, max_length=2000)
+    village_name: str | None = Field(default=None, max_length=150)
 
     @field_validator("booth_number", "name", "address", mode="before")
     @classmethod
     def strip_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("village_name", mode="before")
+    @classmethod
+    def normalize_village_name(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 class BoothUpdate(BaseModel):
@@ -280,6 +335,7 @@ class BoothUpdate(BaseModel):
     booth_number: str | None = Field(default=None, min_length=1, max_length=32)
     name: str | None = Field(default=None, min_length=1, max_length=150)
     address: str | None = Field(default=None, min_length=3, max_length=2000)
+    village_name: str | None = Field(default=None, max_length=150)
 
     @field_validator("panchayat_id", "booth_number", "name", "address", mode="before")
     @classmethod
@@ -288,14 +344,26 @@ class BoothUpdate(BaseModel):
             raise ValueError("Updated fields cannot be null")
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("village_name", mode="before")
+    @classmethod
+    def normalize_village_name(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
 
 class BoothResponse(BaseModel):
     id: int
     panchayat_id: int
     panchayat_name: str
+    block_id: int | None
+    block_name: str | None
+    parent_block_id: int | None
+    parent_block_name: str | None
     booth_number: str
     name: str
     address: str
+    village_name: str | None
     created_at: datetime
 
 
@@ -339,6 +407,10 @@ class VoterResponse(BaseModel):
     booth_number: str
     booth_name: str
     panchayat_name: str
+    block_id: int | None
+    block_name: str | None
+    parent_block_id: int | None
+    parent_block_name: str | None
     electoral_roll_id: str
     name: str
     created_at: datetime
@@ -348,6 +420,21 @@ class AdminSummaryResponse(BaseModel):
     panchayat_count: int
     booth_count: int
     voter_count: int
+
+
+class BoothImportRow(BaseModel):
+    row_number: int = Field(gt=1)
+    booth_number: str = Field(max_length=32)
+    polling_station_name: str = Field(max_length=150)
+    polling_station_address: str = Field(max_length=2000)
+    block_name: str = Field(max_length=150)
+    village_name: str = Field(default="", max_length=150)
+    panchayat_name: str = Field(max_length=150)
+
+
+class BoothImportConfirmation(BaseModel):
+    confirmed: Literal[True]
+    rows: list[BoothImportRow] = Field(min_length=1, max_length=MAX_IMPORT_ROWS)
 
 
 password_hasher = PasswordHash.recommended()
@@ -582,6 +669,109 @@ async def get_admin_user(
     return user
 
 
+async def get_panchayat_block(
+    session: AsyncSession, block_id: int | None
+) -> Block | None:
+    if block_id is None:
+        return None
+    block = await session.get(Block, block_id)
+    if block is None:
+        raise HTTPException(status_code=404, detail="Block not found")
+    if block.parent_id is None:
+        raise HTTPException(
+            status_code=422, detail="Panchayats must be assigned to a child Block"
+        )
+    return block
+
+
+async def get_block_parent(
+    session: AsyncSession, block: Block | None
+) -> Block | None:
+    if block is None or block.parent_id is None:
+        return None
+    return await session.get(Block, block.parent_id)
+
+
+def block_response_fields(
+    block: Block | None, parent: Block | None
+) -> dict[str, int | str | None]:
+    return {
+        "block_id": block.id if block else None,
+        "block_name": block.name if block else None,
+        "parent_block_id": parent.id if parent else None,
+        "parent_block_name": parent.name if parent else None,
+    }
+
+
+def make_panchayat_response(
+    panchayat: Panchayat, block: Block | None, parent: Block | None
+) -> PanchayatResponse:
+    return PanchayatResponse(
+        id=panchayat.id,
+        name=panchayat.name,
+        created_at=panchayat.created_at,
+        **block_response_fields(block, parent),
+    )
+
+
+def make_booth_response(
+    booth: Booth,
+    panchayat_name: str,
+    block: Block | None,
+    parent: Block | None,
+) -> BoothResponse:
+    return BoothResponse(
+        id=booth.id,
+        panchayat_id=booth.panchayat_id,
+        panchayat_name=panchayat_name,
+        **block_response_fields(block, parent),
+        booth_number=booth.booth_number,
+        name=booth.name,
+        address=booth.address,
+        village_name=booth.village_name,
+        created_at=booth.created_at,
+    )
+
+
+def make_voter_response(
+    voter: Voter,
+    booth_number: str,
+    booth_name: str,
+    panchayat_name: str,
+    block: Block | None,
+    parent: Block | None,
+) -> VoterResponse:
+    return VoterResponse(
+        id=voter.id,
+        booth_id=voter.booth_id,
+        booth_number=booth_number,
+        booth_name=booth_name,
+        panchayat_name=panchayat_name,
+        **block_response_fields(block, parent),
+        electoral_roll_id=voter.electoral_roll_id,
+        name=voter.name,
+        created_at=voter.created_at,
+    )
+
+
+async def get_panchayat_block_context(
+    session: AsyncSession, panchayat: Panchayat
+) -> tuple[Block | None, Block | None]:
+    block = (
+        await session.get(Block, panchayat.block_id)
+        if panchayat.block_id is not None
+        else None
+    )
+    return block, await get_block_parent(session, block)
+
+
+async def get_panchayat_response(
+    session: AsyncSession, panchayat: Panchayat
+) -> PanchayatResponse:
+    block, parent = await get_panchayat_block_context(session, panchayat)
+    return make_panchayat_response(panchayat, block, parent)
+
+
 @app.get("/auth/me", response_model=AuthenticatedUserResponse)
 async def get_authenticated_user(
     user: User = Depends(get_current_user),
@@ -611,12 +801,48 @@ async def get_admin_summary(
     )
 
 
+@app.get("/workspace/blocks", response_model=list[BlockResponse])
+async def list_workspace_blocks(
+    _user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    return (
+        await session.scalars(
+            select(Block).order_by(Block.parent_id, Block.name)
+        )
+    ).all()
+
+
+@app.get("/admin/blocks", response_model=list[BlockResponse])
+async def list_blocks(
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    return (
+        await session.scalars(
+            select(Block).order_by(Block.parent_id, Block.name)
+        )
+    ).all()
+
+
 @app.get("/workspace/panchayats", response_model=list[PanchayatResponse])
 async def list_workspace_panchayats(
     _user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    return (await session.scalars(select(Panchayat).order_by(Panchayat.name))).all()
+    parent_block = aliased(Block)
+    rows = (
+        await session.execute(
+            select(Panchayat, Block, parent_block)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
+            .order_by(Panchayat.name)
+        )
+    ).all()
+    return [
+        make_panchayat_response(panchayat, block, parent)
+        for panchayat, block, parent in rows
+    ]
 
 
 @app.get("/workspace/booths", response_model=list[BoothResponse])
@@ -624,10 +850,13 @@ async def list_workspace_booths(
     _user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
+    parent_block = aliased(Block)
     rows = (
         await session.execute(
-            select(Booth, Panchayat.name)
+            select(Booth, Panchayat.name, Block, parent_block)
             .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
             .order_by(Panchayat.name, Booth.booth_number)
         )
     ).all()
@@ -636,12 +865,14 @@ async def list_workspace_booths(
             id=booth.id,
             panchayat_id=booth.panchayat_id,
             panchayat_name=panchayat_name,
+            **block_response_fields(block, parent),
             booth_number=booth.booth_number,
             name=booth.name,
             address=booth.address,
+            village_name=booth.village_name,
             created_at=booth.created_at,
         )
-        for booth, panchayat_name in rows
+        for booth, panchayat_name, block, parent in rows
     ]
 
 
@@ -650,11 +881,21 @@ async def list_workspace_voters(
     _user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
+    parent_block = aliased(Block)
     rows = (
         await session.execute(
-            select(Voter, Booth.booth_number, Booth.name, Panchayat.name)
+            select(
+                Voter,
+                Booth.booth_number,
+                Booth.name,
+                Panchayat.name,
+                Block,
+                parent_block,
+            )
             .join(Booth, Voter.booth_id == Booth.id)
             .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
             .order_by(Voter.name)
         )
     ).all()
@@ -665,11 +906,12 @@ async def list_workspace_voters(
             booth_number=booth_number,
             booth_name=booth_name,
             panchayat_name=panchayat_name,
+            **block_response_fields(block, parent),
             electoral_roll_id=voter.electoral_roll_id,
             name=voter.name,
             created_at=voter.created_at,
         )
-        for voter, booth_number, booth_name, panchayat_name in rows
+        for voter, booth_number, booth_name, panchayat_name, block, parent in rows
     ]
 
 
@@ -678,7 +920,19 @@ async def list_panchayats(
     _admin: User = Depends(get_admin_user),
     session: AsyncSession = Depends(get_db),
 ):
-    return (await session.scalars(select(Panchayat).order_by(Panchayat.name))).all()
+    parent_block = aliased(Block)
+    rows = (
+        await session.execute(
+            select(Panchayat, Block, parent_block)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
+            .order_by(Panchayat.name)
+        )
+    ).all()
+    return [
+        make_panchayat_response(panchayat, block, parent)
+        for panchayat, block, parent in rows
+    ]
 
 
 @app.post(
@@ -691,7 +945,8 @@ async def create_panchayat(
     _admin: User = Depends(get_admin_user),
     session: AsyncSession = Depends(get_db),
 ):
-    panchayat = Panchayat(name=record.name)
+    block = await get_panchayat_block(session, record.block_id)
+    panchayat = Panchayat(name=record.name, block_id=record.block_id)
     session.add(panchayat)
     try:
         await session.commit()
@@ -701,7 +956,8 @@ async def create_panchayat(
             status_code=409, detail="A Panchayat with that name already exists"
         ) from exc
     await session.refresh(panchayat)
-    return panchayat
+    parent = await get_block_parent(session, block)
+    return make_panchayat_response(panchayat, block, parent)
 
 
 @app.patch("/admin/panchayats/{panchayat_id}", response_model=PanchayatResponse)
@@ -717,6 +973,8 @@ async def update_panchayat(
     fields = changes.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=422, detail="At least one field is required")
+    if "block_id" in fields:
+        await get_panchayat_block(session, fields["block_id"])
     for field, value in fields.items():
         setattr(panchayat, field, value)
     try:
@@ -727,7 +985,7 @@ async def update_panchayat(
             status_code=409, detail="A Panchayat with that name already exists"
         ) from exc
     await session.refresh(panchayat)
-    return panchayat
+    return await get_panchayat_response(session, panchayat)
 
 
 @app.delete("/admin/panchayats/{panchayat_id}", status_code=204)
@@ -758,29 +1016,253 @@ async def delete_panchayat(
         ) from exc
 
 
+async def validate_booth_import_rows(
+    session: AsyncSession,
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    blocks = (await session.scalars(select(Block))).all()
+    panchayats = (await session.scalars(select(Panchayat))).all()
+    existing_booths = (
+        await session.execute(select(Booth.panchayat_id, Booth.booth_number))
+    ).all()
+
+    blocks_by_name: dict[str, list[Block]] = {}
+    for block in blocks:
+        blocks_by_name.setdefault(block.name.strip().casefold(), []).append(block)
+    panchayats_by_name: dict[str, list[Panchayat]] = {}
+    for panchayat in panchayats:
+        panchayats_by_name.setdefault(
+            panchayat.name.strip().casefold(), []
+        ).append(panchayat)
+
+    existing_booth_keys = {
+        (panchayat_id, booth_number)
+        for panchayat_id, booth_number in existing_booths
+    }
+    validated_rows: list[dict[str, Any]] = []
+    rows_by_booth_key: dict[tuple[int, str], int] = {}
+    for source in rows:
+        row = {
+            "row_number": source["row_number"],
+            "booth_number": str(source.get("booth_number", "")).strip(),
+            "polling_station_name": str(
+                source.get("polling_station_name", "")
+            ).strip(),
+            "polling_station_address": str(
+                source.get("polling_station_address", "")
+            ).strip(),
+            "block_name": str(source.get("block_name", "")).strip(),
+            "village_name": str(source.get("village_name", "")).strip(),
+            "panchayat_name": str(source.get("panchayat_name", "")).strip(),
+            "panchayat_id": None,
+            "errors": [],
+        }
+        errors = list(source.get("parse_errors", []))
+        row["errors"] = errors
+
+        required = {
+            "booth_number": "Booth number",
+            "polling_station_name": "Polling station name",
+            "polling_station_address": "Polling station address",
+            "block_name": "Block name",
+            "panchayat_name": "Panchayat name",
+        }
+        for field_name, label in required.items():
+            if not row[field_name]:
+                errors.append(f"{label} is required.")
+
+        field_limits = {
+            "booth_number": 32,
+            "polling_station_name": 150,
+            "polling_station_address": 2000,
+            "block_name": 150,
+            "village_name": 150,
+            "panchayat_name": 150,
+        }
+        for field_name, max_length in field_limits.items():
+            if len(row[field_name]) > max_length:
+                errors.append(
+                    f"{field_name.replace('_', ' ').capitalize()} "
+                    f"must be no longer than {max_length} characters."
+                )
+            if "\x00" in row[field_name]:
+                errors.append(
+                    f"{field_name.replace('_', ' ').capitalize()} contains an invalid character."
+                )
+        if (
+            row["polling_station_address"]
+            and len(row["polling_station_address"]) < 3
+        ):
+            errors.append("Polling station address must contain at least 3 characters.")
+
+        block = None
+        if row["block_name"]:
+            block_matches = blocks_by_name.get(row["block_name"].casefold(), [])
+            if len(block_matches) == 1:
+                block = block_matches[0]
+            elif not block_matches:
+                errors.append(f"Block '{row['block_name']}' does not exist.")
+            else:
+                errors.append(
+                    f"Block name '{row['block_name']}' matches multiple records."
+                )
+
+        panchayat = None
+        if row["panchayat_name"]:
+            panchayat_matches = panchayats_by_name.get(
+                row["panchayat_name"].casefold(), []
+            )
+            if len(panchayat_matches) == 1:
+                panchayat = panchayat_matches[0]
+                row["panchayat_id"] = panchayat.id
+            elif not panchayat_matches:
+                errors.append(
+                    f"Panchayat '{row['panchayat_name']}' does not exist."
+                )
+            else:
+                errors.append(
+                    f"Panchayat name '{row['panchayat_name']}' matches multiple records."
+                )
+
+        if block is not None and panchayat is not None:
+            if panchayat.block_id != block.id:
+                errors.append(
+                    f"Panchayat '{panchayat.name}' is not assigned to "
+                    f"Block '{block.name}'."
+                )
+
+            booth_number = row["booth_number"]
+            if booth_number:
+                key = (panchayat.id, booth_number)
+                previous_index = rows_by_booth_key.get(key)
+                if previous_index is not None:
+                    previous_row = validated_rows[previous_index]
+                    previous_row["errors"].append(
+                        f"Duplicate booth number in this file (row {row['row_number']})."
+                    )
+                    errors.append(
+                        f"Duplicate booth number in this file (row {previous_row['row_number']})."
+                    )
+                else:
+                    rows_by_booth_key[key] = len(validated_rows)
+                if key in existing_booth_keys:
+                    errors.append(
+                        "This booth number already exists in the selected Panchayat."
+                    )
+
+        row["name"] = row["polling_station_name"]
+        row["address"] = row["polling_station_address"]
+        validated_rows.append(row)
+
+    return validated_rows
+
+
+async def read_booth_import_upload(request: Request) -> bytes:
+    max_file_size = 10 * 1024 * 1024
+    chunks = []
+    total_size = 0
+    async for chunk in request.stream():
+        total_size += len(chunk)
+        if total_size > max_file_size:
+            raise HTTPException(
+                status_code=413,
+                detail="Import files must be no larger than 10 MB.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.post("/admin/booths/import/preview")
+async def preview_booth_import(
+    request: Request,
+    filename: str = Query(min_length=1, max_length=255),
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    try:
+        rows = parse_booth_import(filename, await read_booth_import_upload(request))
+    except BoothImportFormatError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not rows:
+        raise HTTPException(
+            status_code=422,
+            detail="The file does not contain any booth data rows.",
+        )
+
+    validated_rows = await validate_booth_import_rows(session, rows)
+    error_count = sum(bool(row["errors"]) for row in validated_rows)
+    return {
+        "row_count": len(validated_rows),
+        "valid_count": len(validated_rows) - error_count,
+        "error_count": error_count,
+        "importable": error_count == 0,
+        "rows": validated_rows,
+    }
+
+
+@app.post("/admin/booths/import/confirm")
+async def confirm_booth_import(
+    confirmation: BoothImportConfirmation,
+    _admin: User = Depends(get_admin_user),
+    session: AsyncSession = Depends(get_db),
+):
+    if not confirmation.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit confirmation is required before importing booths.",
+        )
+
+    validated_rows = await validate_booth_import_rows(
+        session,
+        [row.model_dump() for row in confirmation.rows],
+    )
+    if any(row["errors"] for row in validated_rows):
+        raise HTTPException(
+            status_code=409,
+            detail="Import validation changed. Review a new preview before confirming.",
+        )
+
+    booths = [
+        Booth(
+            panchayat_id=row["panchayat_id"],
+            booth_number=row["booth_number"],
+            name=row["name"],
+            address=row["address"],
+            village_name=row["village_name"] or None,
+        )
+        for row in validated_rows
+    ]
+    session.add_all(booths)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Booth records changed during import. No rows were saved; preview the file again.",
+        ) from exc
+    return {"imported_count": len(booths)}
+
+
 @app.get("/admin/booths", response_model=list[BoothResponse])
 async def list_booths(
     _admin: User = Depends(get_admin_user),
     session: AsyncSession = Depends(get_db),
 ):
+    parent_block = aliased(Block)
     rows = (
         await session.execute(
-            select(Booth, Panchayat.name)
-            .join(Panchayat)
+            select(Booth, Panchayat.name, Block, parent_block)
+            .select_from(Booth)
+            .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
             .order_by(Panchayat.name, Booth.booth_number)
         )
     ).all()
     return [
-        BoothResponse(
-            id=booth.id,
-            panchayat_id=booth.panchayat_id,
-            panchayat_name=panchayat_name,
-            booth_number=booth.booth_number,
-            name=booth.name,
-            address=booth.address,
-            created_at=booth.created_at,
-        )
-        for booth, panchayat_name in rows
+        make_booth_response(booth, panchayat_name, block, parent)
+        for booth, panchayat_name, block, parent in rows
     ]
 
 
@@ -804,15 +1286,8 @@ async def create_booth(
             detail="That booth number is already used in this Panchayat",
         ) from exc
     await session.refresh(booth)
-    return BoothResponse(
-        id=booth.id,
-        panchayat_id=booth.panchayat_id,
-        panchayat_name=panchayat.name,
-        booth_number=booth.booth_number,
-        name=booth.name,
-        address=booth.address,
-        created_at=booth.created_at,
-    )
+    block, parent = await get_panchayat_block_context(session, panchayat)
+    return make_booth_response(booth, panchayat.name, block, parent)
 
 
 @app.patch("/admin/booths/{booth_id}", response_model=BoothResponse)
@@ -843,15 +1318,8 @@ async def update_booth(
             detail="That booth number is already used in this Panchayat",
         ) from exc
     await session.refresh(booth)
-    return BoothResponse(
-        id=booth.id,
-        panchayat_id=booth.panchayat_id,
-        panchayat_name=panchayat.name,
-        booth_number=booth.booth_number,
-        name=booth.name,
-        address=booth.address,
-        created_at=booth.created_at,
-    )
+    block, parent = await get_panchayat_block_context(session, panchayat)
+    return make_booth_response(booth, panchayat.name, block, parent)
 
 
 @app.delete("/admin/booths/{booth_id}", status_code=204)
@@ -887,26 +1355,29 @@ async def list_voters(
     _admin: User = Depends(get_admin_user),
     session: AsyncSession = Depends(get_db),
 ):
+    parent_block = aliased(Block)
     rows = (
         await session.execute(
-            select(Voter, Booth.booth_number, Booth.name, Panchayat.name)
+            select(
+                Voter,
+                Booth.booth_number,
+                Booth.name,
+                Panchayat.name,
+                Block,
+                parent_block,
+            )
             .join(Booth, Voter.booth_id == Booth.id)
             .join(Panchayat, Booth.panchayat_id == Panchayat.id)
+            .outerjoin(Block, Panchayat.block_id == Block.id)
+            .outerjoin(parent_block, Block.parent_id == parent_block.id)
             .order_by(Voter.name)
         )
     ).all()
     return [
-        VoterResponse(
-            id=voter.id,
-            booth_id=voter.booth_id,
-            booth_number=booth_number,
-            booth_name=booth_name,
-            panchayat_name=panchayat_name,
-            electoral_roll_id=voter.electoral_roll_id,
-            name=voter.name,
-            created_at=voter.created_at,
+        make_voter_response(
+            voter, booth_number, booth_name, panchayat_name, block, parent
         )
-        for voter, booth_number, booth_name, panchayat_name in rows
+        for voter, booth_number, booth_name, panchayat_name, block, parent in rows
     ]
 
 
@@ -932,15 +1403,9 @@ async def create_voter(
             status_code=409, detail="That electoral roll ID already exists"
         ) from exc
     await session.refresh(voter)
-    return VoterResponse(
-        id=voter.id,
-        booth_id=voter.booth_id,
-        booth_number=booth.booth_number,
-        booth_name=booth.name,
-        panchayat_name=panchayat.name,
-        electoral_roll_id=voter.electoral_roll_id,
-        name=voter.name,
-        created_at=voter.created_at,
+    block, parent = await get_panchayat_block_context(session, panchayat)
+    return make_voter_response(
+        voter, booth.booth_number, booth.name, panchayat.name, block, parent
     )
 
 
@@ -974,15 +1439,9 @@ async def update_voter(
             status_code=409, detail="That electoral roll ID already exists"
         ) from exc
     await session.refresh(voter)
-    return VoterResponse(
-        id=voter.id,
-        booth_id=voter.booth_id,
-        booth_number=booth.booth_number,
-        booth_name=booth.name,
-        panchayat_name=panchayat.name,
-        electoral_roll_id=voter.electoral_roll_id,
-        name=voter.name,
-        created_at=voter.created_at,
+    block, parent = await get_panchayat_block_context(session, panchayat)
+    return make_voter_response(
+        voter, booth.booth_number, booth.name, panchayat.name, block, parent
     )
 
 

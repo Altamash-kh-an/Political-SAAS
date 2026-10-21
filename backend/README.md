@@ -20,7 +20,29 @@ The constituency-record migration creates empty Panchayat, Booth, and Voter
 tables. Panchayats store a unique name; Booths store a number, name, and address
 and reference one Panchayat; Voters store a name and unique electoral-roll ID
 and reference one Booth. A parent record cannot be deleted while it has
-dependent records. No sample records are seeded.
+dependent records. No sample Panchayat, Booth, or Voter records are seeded.
+
+The `20261018_03` migration adds a Block hierarchy with `Nathnagar Block` as the
+parent of `Nathnagar`, `Jagdishpur`, and `Sabour`. Panchayats gain a nullable
+Block reference. Existing Panchayats are intentionally left unassigned; assign
+them only after their correct Block is verified. Booth and Voter responses
+derive Block information through their existing Panchayat and Booth references.
+The downgrade refuses to proceed if any Panchayat is assigned or the seeded
+Block rows have changed or been extended, preventing removal of user data.
+
+The Admin Booth Management page supports previewing `.xlsx` and UTF-8 `.csv`
+files with the `booth_number`, `polling_station_name`,
+`polling_station_address`, `block_name`, `village_name`, and `panchayat_name`
+columns. Names are matched to existing Blocks/Panchayats after trimming and
+case-folding, and each Panchayat must already be assigned to the named Block.
+The preview also checks booth-number conflicts; it does not create or update
+Blocks or Panchayats. Only an explicit confirmation imports the entire valid
+batch in one transaction. Files are limited to 10 MB and 5,000 data rows.
+
+The Booth API/model now includes nullable `village_name`, which requires the
+`20261020_04` migration. Apply that migration only after verifying the database
+revision and its prerequisite Block hierarchy migration. Do not enable the
+updated API against a database that has not applied this column migration.
 
 Provision the first Admin interactively from the `backend` directory after the
 migrations have completed:

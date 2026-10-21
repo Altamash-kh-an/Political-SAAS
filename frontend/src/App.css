@@ -414,7 +414,7 @@ tbody td:first-child { padding-left: 4px; }
 .workspace-map + .data-note { margin-top: 14px; }
 
 .admin-live-badge > span { background: #70d9aa; }
-.admin-dashboard-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.admin-dashboard-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .admin-count-tag { padding: 4px 6px; border: 1px solid #285543; border-radius: 5px; color: #88ddb5; background: #172d2a; font-size: 7px; font-weight: 700; letter-spacing: .5px; }
 .admin-dashboard-copy { margin: -5px 0 18px; color: #a3b1c6; font-size: 12px; line-height: 1.7; }
 .admin-dashboard-actions { display: flex; flex-wrap: wrap; gap: 9px; }
@@ -810,6 +810,21 @@ body {
   box-shadow: 0 10px 28px #02061227, inset 0 1px #ffffff08;
 }
 
+.stat-card-clickable {
+  display: block;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stat-card-clickable:focus-visible,
+.block-overview-card:focus-visible {
+  outline: 2px solid #85acff;
+  outline-offset: 3px;
+}
+
 .stat-card::after {
   position: absolute;
   top: -52px;
@@ -854,6 +869,104 @@ body {
   border-radius: 13px;
   background: linear-gradient(145deg, #131d30, #101827 74%);
   box-shadow: 0 12px 34px #02061226, inset 0 1px #ffffff08;
+}
+
+.block-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.block-overview-card {
+  position: relative;
+  display: flex;
+  min-height: 132px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 9px;
+  padding: 19px;
+  border: 1px solid #2a3852;
+  border-radius: 13px;
+  color: #dce5f4;
+  background: linear-gradient(150deg, #151f33, #101827 78%);
+  box-shadow: 0 10px 28px #02061227, inset 0 1px #ffffff08;
+  text-align: left;
+  cursor: pointer;
+  transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+
+.block-overview-card:hover {
+  transform: translateY(-3px);
+  border-color: #49648f;
+  box-shadow: 0 14px 34px #02061240, 0 0 24px #527ef012;
+}
+
+.block-overview-icon {
+  display: grid;
+  width: 35px;
+  height: 35px;
+  place-items: center;
+  border: 1px solid #ffffff0d;
+  border-radius: 9px;
+  color: #83adff;
+  background: #20365c;
+}
+
+.block-overview-card > strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.block-overview-card > span:nth-last-of-type(1) {
+  color: #8798b1;
+  font-size: 10px;
+}
+
+.block-overview-card > svg {
+  position: absolute;
+  right: 18px;
+  bottom: 19px;
+  color: #85acff;
+}
+
+.block-detail-panchayat-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.block-detail-panchayat-list li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid #29374b;
+  border-radius: 8px;
+  color: #dbe5f4;
+  background: #172335;
+  font-size: 11px;
+}
+
+.block-detail-panchayat-list svg {
+  flex-shrink: 0;
+  color: #94b8fa;
+}
+
+@media (max-width: 900px) {
+  .block-overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .block-overview-grid,
+  .block-detail-panchayat-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .workspace-panel {
@@ -1655,6 +1768,174 @@ button,
     padding: 20px 16px;
     border-radius: 13px;
     font-size: clamp(22px, 6vw, 28px);
+  }
+}
+
+.admin-hierarchy-section {
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #28364c;
+}
+
+.block-hierarchy {
+  display: grid;
+  gap: 14px;
+}
+
+.hierarchy-root {
+  padding: 15px;
+  border: 1px solid #354967;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #18283c, #121d2d);
+}
+
+.hierarchy-root > h2 {
+  margin: 0 0 13px;
+  color: #e3ebf8;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.hierarchy-block-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hierarchy-block {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #2c3e56;
+  border-radius: 8px;
+  background: #111c2b;
+}
+
+.hierarchy-block > h3,
+.hierarchy-unassigned-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #a9c4fa;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.hierarchy-panchayat-list {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 10px 0 0;
+  list-style: none;
+}
+
+.hierarchy-panchayat {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #29374b;
+  border-radius: 7px;
+  background: #172335;
+}
+
+.hierarchy-panchayat-edit {
+  flex-shrink: 0;
+  padding: 4px 7px;
+  border: 1px solid #344b6b;
+  border-radius: 6px;
+  color: #a9c4fa;
+  background: #17253b;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.hierarchy-panchayat-edit:hover {
+  border-color: #5b91ff;
+  color: #dbe5f4;
+}
+
+.hierarchy-panchayat-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #94b8fa;
+}
+
+.hierarchy-panchayat-name strong {
+  overflow-wrap: anywhere;
+  color: #dbe5f4;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.hierarchy-panchayat-counts {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 3px;
+  color: #8fa0b8;
+  font-size: 8px;
+  text-align: right;
+}
+
+.hierarchy-empty {
+  margin: 10px 0 0;
+  color: #8191a8;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.hierarchy-unassigned {
+  padding: 13px 15px;
+  border: 1px solid #66553b;
+  border-radius: 9px;
+  background: #282318;
+}
+
+.hierarchy-unassigned-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hierarchy-unassigned-heading h3 {
+  color: #f0c88e;
+}
+
+.hierarchy-unassigned-heading > span {
+  color: #f0c88e;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.hierarchy-unassigned > p {
+  margin: 5px 0 0;
+  color: #b6a17e;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .hierarchy-block-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .hierarchy-block-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hierarchy-root {
+    padding: 12px;
+  }
+
+  .hierarchy-panchayat {
+    align-items: center;
   }
 }
 

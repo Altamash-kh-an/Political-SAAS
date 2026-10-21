@@ -3,3 +3,8 @@
 node_modules/
 __pycache__/
 *.py[cod]
+nathnagar_booths.xlsx
+nathnagar_booths_reviewed.xlsx
+/frontend-build-temp/
+# Temporary frontend build output
+/frontend-build-temp/

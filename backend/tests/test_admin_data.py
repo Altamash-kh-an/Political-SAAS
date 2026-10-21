@@ -34,6 +34,9 @@ class FakeSession:
     async def scalar(self, _statement):
         return self.scalar_value
 
+    async def scalars(self, _statement):
+        return self
+
     async def execute(self, statement):
         self.statement = statement
         return self
@@ -96,18 +99,31 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
 
     def test_management_schemas_strip_values_and_normalize_roll_id(self):
         panchayat = main.PanchayatCreate(name="  North Panchayat ")
+        booth = main.BoothCreate(
+            panchayat_id=1,
+            booth_number="001",
+            name="Polling Station",
+            address="Main Road",
+            village_name="  नया टोला ",
+        )
+        booth_update = main.BoothUpdate(village_name="  पुराना टोला ")
         voter = main.VoterCreate(
             booth_id=1,
             electoral_roll_id=" ab-123 ",
             name="  A Voter ",
         )
         self.assertEqual(panchayat.name, "North Panchayat")
+        self.assertEqual(booth.village_name, "नया टोला")
+        self.assertEqual(booth_update.village_name, "पुराना टोला")
         self.assertEqual(voter.electoral_roll_id, "AB-123")
         self.assertEqual(voter.name, "A Voter")
 
     def test_management_schemas_reject_empty_values_and_invalid_ids(self):
         with self.assertRaises(ValidationError):
             main.PanchayatCreate(name="  ")
+        with self.assertRaises(ValidationError):
+            main.PanchayatCreate(name="Valid Panchayat", block_id=0)
+        self.assertIsNone(main.PanchayatUpdate(block_id=None).block_id)
         with self.assertRaises(ValidationError):
             main.BoothCreate(
                 panchayat_id=0,
@@ -122,6 +138,8 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_voters_joins_through_booth_and_panchayat_explicitly(self):
         panchayat = main.Panchayat(id=2, name="North Panchayat")
+        parent = main.Block(id=1, name="Nathnagar Block")
+        block = main.Block(id=3, name="Sabour", parent_id=1)
         booth = main.Booth(
             id=4,
             panchayat_id=2,
@@ -137,7 +155,9 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
             created_at=datetime.now(timezone.utc),
         )
         session = FakeSession(
-            query_rows=[(voter, booth.booth_number, booth.name, panchayat.name)]
+            query_rows=[
+                (voter, booth.booth_number, booth.name, panchayat.name, block, parent)
+            ]
         )
 
         result = await main.list_voters(self.make_user("admin"), session)
@@ -150,6 +170,39 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].booth_id, booth.id)
         self.assertEqual(result[0].electoral_roll_id, "AB-123")
         self.assertEqual(result[0].panchayat_name, panchayat.name)
+        self.assertEqual(result[0].block_name, "Sabour")
+        self.assertEqual(result[0].parent_block_name, "Nathnagar Block")
+
+    async def test_list_booths_joins_from_booths_to_panchayats_explicitly(self):
+        panchayat = main.Panchayat(id=2, name="North Panchayat")
+        parent = main.Block(id=1, name="Nathnagar Block")
+        block = main.Block(id=3, name="Sabour", parent_id=1)
+        booth = main.Booth(
+            id=4,
+            panchayat_id=2,
+            booth_number="001",
+            name="Central Polling Station",
+            address="Main Road",
+            village_name="नया टोला",
+            created_at=datetime.now(timezone.utc),
+        )
+        session = FakeSession(
+            query_rows=[(booth, panchayat.name, block, parent)]
+        )
+
+        result = await main.list_booths(self.make_user("admin"), session)
+        statement = str(session.statement)
+
+        self.assertIn("FROM booths", statement)
+        self.assertIn(
+            "JOIN panchayats ON booths.panchayat_id = panchayats.id", statement
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].id, booth.id)
+        self.assertEqual(result[0].village_name, "नया टोला")
+        self.assertEqual(result[0].panchayat_name, panchayat.name)
+        self.assertEqual(result[0].block_name, "Sabour")
+        self.assertEqual(result[0].parent_block_name, "Nathnagar Block")
 
     async def test_create_panchayat_persists_record(self):
         session = FakeSession()
@@ -161,6 +214,49 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.committed)
         self.assertEqual(session.added.name, "North Panchayat")
         self.assertEqual(result.id, 1)
+        self.assertIsNone(result.block_id)
+
+    async def test_create_panchayat_can_be_assigned_to_a_child_block(self):
+        parent = main.Block(id=1, name="Nathnagar Block")
+        block = main.Block(id=3, name="Sabour", parent_id=1)
+        session = FakeSession(
+            records={(main.Block, 3): block, (main.Block, 1): parent}
+        )
+
+        result = await main.create_panchayat(
+            main.PanchayatCreate(name="North Panchayat", block_id=3),
+            self.make_user("admin"),
+            session,
+        )
+
+        self.assertTrue(session.committed)
+        self.assertEqual(session.added.block_id, 3)
+        self.assertEqual(result.block_name, "Sabour")
+        self.assertEqual(result.parent_block_name, "Nathnagar Block")
+
+    async def test_create_panchayat_rejects_parent_area_as_assignment(self):
+        parent = main.Block(id=1, name="Nathnagar Block")
+        session = FakeSession(records={(main.Block, 1): parent})
+
+        with self.assertRaises(HTTPException) as raised:
+            await main.create_panchayat(
+                main.PanchayatCreate(name="North Panchayat", block_id=1),
+                self.make_user("admin"),
+                session,
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIsNone(session.added)
+        self.assertFalse(session.committed)
+
+    async def test_admin_block_list_includes_parent_and_child_records(self):
+        parent = main.Block(id=1, name="Nathnagar Block", parent_id=None)
+        child = main.Block(id=2, name="Jagdishpur", parent_id=1)
+        session = FakeSession(query_rows=[parent, child])
+
+        result = await main.list_blocks(self.make_user("admin"), session)
+
+        self.assertEqual([block.name for block in result], ["Nathnagar Block", "Jagdishpur"])
 
     async def test_create_booth_requires_existing_panchayat(self):
         session = FakeSession()
@@ -187,12 +283,15 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
                 booth_number="001",
                 name="Central Polling Station",
                 address="Main Road",
+                village_name="नया टोला",
             ),
             self.make_user("admin"),
             session,
         )
         self.assertTrue(session.committed)
         self.assertEqual(session.added.panchayat_id, 2)
+        self.assertEqual(session.added.village_name, "नया टोला")
+        self.assertEqual(result.village_name, "नया टोला")
         self.assertEqual(result.panchayat_name, "North Panchayat")
 
     async def test_create_voter_attaches_voter_to_existing_booth(self):
@@ -232,6 +331,36 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.committed)
         self.assertEqual(result.name, "New Name")
 
+    async def test_update_panchayat_can_assign_and_clear_block(self):
+        parent = main.Block(id=1, name="Nathnagar Block")
+        block = main.Block(id=3, name="Sabour", parent_id=1)
+        panchayat = main.Panchayat(id=2, name="North Panchayat")
+        session = FakeSession(
+            records={
+                (main.Panchayat, 2): panchayat,
+                (main.Block, 3): block,
+                (main.Block, 1): parent,
+            }
+        )
+
+        assigned = await main.update_panchayat(
+            2,
+            main.PanchayatUpdate(block_id=3),
+            self.make_user("admin"),
+            session,
+        )
+        self.assertEqual(assigned.block_id, 3)
+        self.assertEqual(assigned.parent_block_name, "Nathnagar Block")
+
+        unassigned = await main.update_panchayat(
+            2,
+            main.PanchayatUpdate(block_id=None),
+            self.make_user("admin"),
+            session,
+        )
+        self.assertIsNone(unassigned.block_id)
+        self.assertIsNone(unassigned.block_name)
+
     async def test_update_booth_can_reassign_parent(self):
         old_panchayat = main.Panchayat(id=2, name="North Panchayat")
         new_panchayat = main.Panchayat(id=3, name="South Panchayat")
@@ -251,13 +380,22 @@ class AdminDataTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await main.update_booth(
             4,
-            main.BoothUpdate(panchayat_id=3),
+            main.BoothUpdate(panchayat_id=3, village_name="नया टोला"),
             self.make_user("admin"),
             session,
         )
         self.assertTrue(session.committed)
         self.assertEqual(result.panchayat_id, 3)
+        self.assertEqual(result.village_name, "नया टोला")
         self.assertEqual(result.panchayat_name, "South Panchayat")
+
+        cleared = await main.update_booth(
+            4,
+            main.BoothUpdate(village_name=None),
+            self.make_user("admin"),
+            session,
+        )
+        self.assertIsNone(cleared.village_name)
 
     async def test_update_voter_can_reassign_booth(self):
         panchayat = main.Panchayat(id=2, name="North Panchayat")

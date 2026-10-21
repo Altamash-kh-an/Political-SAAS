@@ -9,7 +9,6 @@ import {
   Lightbulb,
   MapPin,
   MessageSquare,
-  ShieldCheck,
   Sparkles,
   Target,
   Users,
@@ -18,6 +17,12 @@ import {
 import { useState } from "react";
 import { filterRecordsBySearch, formatRelativeTime } from "./services/dashboardService";
 import AdminDataManagement from "./AdminDataManagement";
+import {
+  configuredBlockPanchayats,
+  getBlockDisplayName,
+  preferredBlockOrder,
+  sortBlocks,
+} from "./blockHierarchyUtils";
 
 const activityIcons = {
   report: FileText,
@@ -27,6 +32,7 @@ const activityIcons = {
 };
 
 const numberFormat = new Intl.NumberFormat();
+const demoBlockCount = 3;
 
 function PageHeading({ eyebrow, title, description, children }) {
   return (
@@ -121,15 +127,20 @@ function ActivityList({ records, emptyMessage }) {
   );
 }
 
-function StatCard({ label, value, note, icon: Icon, color, sourceTag = "SAMPLE" }) {
-  return (
-    <article className="stat-card">
+function StatCard({ label, value, note, icon: Icon, color, sourceTag = "SAMPLE", onClick }) {
+  const content = (
+    <>
       <div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={20} /></div><span className="sample-tag">{sourceTag}</span></div>
       <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
       <div className="stat-foot"><span>{note}</span></div>
-    </article>
+    </>
   );
+  return onClick ? (
+    <button className="stat-card stat-card-clickable" type="button" onClick={onClick}>
+      {content}
+    </button>
+  ) : <article className="stat-card">{content}</article>;
 }
 
 function AskAI({ constituencyName }) {
@@ -190,7 +201,7 @@ function AskAI({ constituencyName }) {
   );
 }
 
-function Dashboard({ data, summary, panchayats, activities, onNavigate, onClearSearch }) {
+function Dashboard({ data, summary, activities, onNavigate }) {
   const statuses = Object.entries(summary.statusCounts);
   const maxStatusCount = Math.max(1, ...statuses.map(([, count]) => count));
 
@@ -226,10 +237,10 @@ function Dashboard({ data, summary, panchayats, activities, onNavigate, onClearS
       </section>
 
       <section className="stats-grid dashboard-stats">
-        <StatCard label="Sample Panchayats" value={numberFormat.format(summary.panchayatCount)} note="Available records" icon={Building2} color="green" />
-        <StatCard label="Sample Booths" value={numberFormat.format(summary.boothCount)} note="Across sample Panchayats" icon={Vote} color="blue" />
-        <StatCard label="Sample Voters" value={numberFormat.format(summary.voterCount)} note="Across sample Panchayats" icon={Users} color="purple" />
-        <StatCard label="Sample Workers" value={numberFormat.format(summary.workerCount)} note="Across sample Panchayats" icon={ShieldCheck} color="orange" />
+        <StatCard label="Blocks" value={numberFormat.format(demoBlockCount)} note="Configured blocks" icon={Building2} color="green" onClick={() => onNavigate("Blocks")} />
+        <StatCard label="Booths" value={numberFormat.format(summary.boothCount)} note="Across Panchayats" icon={Vote} color="blue" onClick={() => onNavigate("Booth Management")} />
+        <StatCard label="Panchayats" value={numberFormat.format(summary.panchayatCount)} note="Available records" icon={MapPin} color="purple" onClick={() => onNavigate("Panchayats")} />
+        <StatCard label="Voters" value={numberFormat.format(summary.voterCount)} note="Across Booths" icon={Users} color="orange" onClick={() => onNavigate("Voter Insights")} />
       </section>
 
       <section className="workspace-grid dashboard-panels">
@@ -254,18 +265,240 @@ function Dashboard({ data, summary, panchayats, activities, onNavigate, onClearS
         </Panel>
       </section>
 
-      <Panel title="Panchayat directory preview" eyebrow="LOCAL ADMINISTRATION" action={<button className="text-action" onClick={() => onNavigate("Panchayats")}>Open directory <ArrowRight size={15} /></button>}>
-        <PanchayatTable records={panchayats.slice(0, 4)} totalCount={summary.panchayatCount} onClearSearch={onClearSearch} />
+    </>
+  );
+}
+
+const configuredBlocks = [
+  { id: "configured-root", name: "NATHNAGAR BLOCK", parent_id: null },
+  { id: "configured-nathnagar", name: "NATHNAGAR", parent_id: "configured-root" },
+  { id: "configured-jagdishpur", name: "JAGDISHPUR", parent_id: "configured-root" },
+  { id: "configured-sabour", name: "SABOUR", parent_id: "configured-root" },
+];
+
+function BlocksPage({ blocks, panchayats, loading, error, isLive, search, onNavigate }) {
+  if (isLive && loading) return <p className="admin-loading" role="status">Loading Blocks...</p>;
+  if (isLive && error) return <p className="admin-error" role="alert">{error}</p>;
+
+  const displayedBlocks = isLive ? blocks : configuredBlocks;
+  const blocksById = new Map(displayedBlocks.map((block) => [block.id, block]));
+  const visibleBlocks = sortBlocks(
+    displayedBlocks
+      .filter((block) => block.parent_id != null)
+      .filter((block) => preferredBlockOrder.includes(
+        getBlockDisplayName(block, blocksById.get(block.parent_id)).toLocaleUpperCase(),
+      ))
+      .filter((block) => getBlockDisplayName(
+        block,
+        blocksById.get(block.parent_id),
+      ).toLocaleUpperCase().includes(search.trim().toLocaleUpperCase())),
+    blocksById,
+  );
+
+  return (
+    <>
+      <PageHeading eyebrow={isLive ? "LIVE DATABASE" : "LOCAL ADMINISTRATION"} title="Blocks" description="Choose a Block to view its Panchayat directory." />
+      <section className="block-overview-grid" aria-label="Blocks">
+        {visibleBlocks.map((block) => {
+          const name = getBlockDisplayName(block, blocksById.get(block.parent_id)).toLocaleUpperCase();
+          const count = isLive
+            ? panchayats.filter(({ block_id }) => block_id === block.id).length
+            : configuredBlockPanchayats[name]?.length ?? 0;
+          return (
+            <button
+              className="block-overview-card"
+              key={block.id}
+              type="button"
+              onClick={() => onNavigate("Block Details", { ...block, display_name: name })}
+            >
+              <span className="block-overview-icon"><Building2 size={20} /></span>
+              <strong>{name}</strong>
+              <span>{numberFormat.format(count)} Panchayats</span>
+              <ArrowRight size={17} aria-hidden="true" />
+            </button>
+          );
+        })}
+      </section>
+      {visibleBlocks.length === 0 && (
+        <div className="workspace-empty">
+          <strong>{search ? "No matching Blocks" : "No Blocks available"}</strong>
+          <p>{search ? "Try a different search term." : "Block records are not available."}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
+function BlockDetailsPage({ block, blocks, panchayats, loading, error, isLive, search, onNavigate }) {
+  if (!block) {
+    return (
+      <div className="workspace-empty">
+        <strong>No Block selected</strong>
+        <p>Choose a Block from the Blocks overview.</p>
+        <button className="button button-secondary" type="button" onClick={() => onNavigate("Blocks")}>Back to Blocks</button>
+      </div>
+    );
+  }
+  if (isLive && loading) return <p className="admin-loading" role="status">Loading Panchayats...</p>;
+  if (isLive && error) return <p className="admin-error" role="alert">{error}</p>;
+
+  const blocksById = new Map(blocks.map((record) => [record.id, record]));
+  const name = (block.display_name ?? getBlockDisplayName(
+    block,
+    blocksById.get(block.parent_id),
+  )).toLocaleUpperCase();
+  const records = isLive
+    ? panchayats.filter(({ block_id }) => block_id === block.id)
+    : (configuredBlockPanchayats[name] ?? []).map((panchayatName) => ({
+        id: `${name}-${panchayatName}`,
+        name: panchayatName,
+        block_name: name,
+      }));
+  const visibleRecords = records.filter(({ name: panchayatName, block_name }) =>
+    `${panchayatName} ${block_name ?? ""}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
+  );
+
+  return (
+    <>
+      <PageHeading
+        eyebrow="BLOCK DIRECTORY"
+        title={name}
+        description={`Panchayats assigned to ${name}.`}
+      >
+        <button className="button button-secondary" type="button" onClick={() => onNavigate("Blocks")}>
+          <ArrowRight size={15} /> All Blocks
+        </button>
+      </PageHeading>
+      <Panel title="Panchayats" eyebrow={`${visibleRecords.length} OF ${records.length} RECORDS`}>
+        {visibleRecords.length ? (
+          <ul className="block-detail-panchayat-list">
+            {visibleRecords.map((record) => (
+              <li
+                key={record.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onNavigate("Panchayat Details", record)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onNavigate("Panchayat Details", record);
+                  }
+                }}
+              >
+                <Building2 size={15} /><strong>{record.name}</strong>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="workspace-empty">
+            <strong>{search ? "No matching Panchayats" : "No Panchayats assigned"}</strong>
+            <p>{search ? "Try a different search term." : "There are no Panchayat records assigned to this Block."}</p>
+          </div>
+        )}
       </Panel>
     </>
   );
 }
 
-function AdminDashboard({ data, summary, isLoading, error, onNavigate }) {
+function normalizeName(value) {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLocaleLowerCase() : "";
+}
+
+function getDatabasePanchayatId(panchayat) {
+  const numericId = Number(panchayat?.id);
+  return Number.isSafeInteger(numericId) && numericId > 0 ? numericId : null;
+}
+
+function resolveSelectedPanchayat(panchayat, panchayats) {
+  const databaseId = getDatabasePanchayatId(panchayat);
+  if (databaseId !== null) {
+    const match = panchayats.find((record) => Number(record.id) === databaseId);
+    if (match) return match;
+  }
+
+  const name = normalizeName(panchayat?.name);
+  if (name) {
+    const match = panchayats.find((record) => normalizeName(record.name) === name);
+    if (match) return match;
+  }
+
+  return panchayat ?? null;
+}
+
+function PanchayatDetailsPage({ panchayat, block, booths, loading, error, onNavigate }) {
+  if (!panchayat) {
+    return (
+      <div className="workspace-empty">
+        <strong>No Panchayat selected</strong>
+        <p>Choose a Panchayat from a Block.</p>
+        <button className="button button-secondary" type="button" onClick={() => onNavigate("Blocks")}>Back to Blocks</button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <PageHeading
+        eyebrow="PANCHAYAT DIRECTORY"
+        title={panchayat.name}
+        description="Panchayat details and assigned Block."
+      >
+        <button className="button button-secondary" type="button" onClick={() => onNavigate("Block Details", block)}>
+          Back to Block
+        </button>
+      </PageHeading>
+      <Panel title="Assigned Block">
+        <p>{panchayat.block_name ?? "Not assigned"}</p>
+      </Panel>
+      <Panel title="Booths" eyebrow={`${numberFormat.format(booths.length)} TOTAL RECORDS`}>
+        {error ? <p className="admin-error" role="alert">{error}</p> : loading ? (
+          <p className="admin-loading" role="status">Loading Booth records...</p>
+        ) : booths.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>BOOTH NUMBER</th>
+                  <th>BOOTH NAME</th>
+                  <th>ADDRESS</th>
+                  <th>VILLAGE / MOHALLA / TOLA</th>
+                </tr>
+              </thead>
+              <tbody>
+                {booths.map((booth) => (
+                  <tr key={booth.id}>
+                    <td>{booth.booth_number}</td>
+                    <td>{booth.name}</td>
+                    <td>{booth.address}</td>
+                    <td>{booth.village_name ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState title="No Booth records">No Booth records are assigned to this Panchayat.</EmptyState>
+        )}
+      </Panel>
+    </>
+  );
+}
+
+function AdminDashboard({
+  data,
+  summary,
+  isLoading,
+  error,
+  onNavigate,
+  blocks,
+  hierarchyLoading,
+  hierarchyError,
+}) {
   const metrics = [
-    { label: "Panchayats", key: "panchayat_count", icon: Building2, color: "green" },
-    { label: "Booths", key: "booth_count", icon: Vote, color: "blue" },
-    { label: "Voters", key: "voter_count", icon: Users, color: "purple" },
+    { label: "Blocks", value: blocks.filter(({ parent_id }) => parent_id != null).length, icon: Building2, color: "green", page: "Blocks" },
+    { label: "Booths", key: "booth_count", icon: Vote, color: "blue", page: "Booth Management" },
+    { label: "Panchayats", key: "panchayat_count", icon: MapPin, color: "purple", page: "Panchayats" },
+    { label: "Voters", key: "voter_count", icon: Users, color: "orange", page: "Voter Insights" },
   ];
 
   return (
@@ -278,16 +511,25 @@ function AdminDashboard({ data, summary, isLoading, error, onNavigate }) {
         <span className="sample-badge admin-live-badge"><span /> DATABASE</span>
       </PageHeading>
       <section className="stats-grid admin-dashboard-stats">
-        {metrics.map(({ label, key, icon: Icon, color }) => (
-          <article className="stat-card" key={key}>
-            <div className="stat-top"><div className={`stat-icon ${color}`}><Icon size={20} /></div><span className="admin-count-tag">LIVE</span></div>
-            <div className="stat-value">{isLoading ? "…" : summary ? numberFormat.format(summary[key]) : "—"}</div>
-            <div className="stat-label">{label}</div>
-            <div className="stat-foot"><span>Database records</span></div>
-          </article>
+        {metrics.map(({ label, key, value, icon, color, page }) => (
+          <StatCard
+            key={label}
+            label={label}
+            value={isLoading ? "…" : key ? summary ? numberFormat.format(summary[key]) : "—" : numberFormat.format(value)}
+            note="Database records"
+            icon={icon}
+            color={color}
+            sourceTag="LIVE"
+            onClick={() => onNavigate(page)}
+          />
         ))}
       </section>
       {error && <p className="admin-error" role="alert">{error}</p>}
+      <Panel title="Browse Blocks" eyebrow="LIVE DATABASE" action={<button className="text-action" type="button" onClick={() => onNavigate("Blocks")}>Open Blocks <ArrowRight size={15} /></button>}>
+        <p className="admin-dashboard-copy">Open the Blocks overview to browse each Block and its assigned Panchayats.</p>
+        {hierarchyError && <p className="admin-error" role="alert">{hierarchyError}</p>}
+        {hierarchyLoading && <p className="admin-loading" role="status">Loading Block records...</p>}
+      </Panel>
       <Panel title="Manage constituency records" eyebrow="ADMIN ONLY">
         <p className="admin-dashboard-copy">
           Add and maintain verified Panchayat, Booth, and Voter records. Changes are saved directly to the database.
@@ -332,40 +574,13 @@ function getFieldWorkerSummary(records) {
   };
 }
 
-function FieldWorkerPanchayatTable({ records, onClearSearch, search = "" }) {
-  return records.length ? (
-    <>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>PANCHAYAT</th><th>BOOTHS</th><th>VOTERS</th><th>ADDED</th></tr></thead>
-          <tbody>
-            {records.map((record) => (
-              <tr key={record.id}>
-                <td><div className="panchayat-name"><span className="panchayat-avatar">{record.name.charAt(0)}</span><strong>{record.name}</strong></div></td>
-                <td>{numberFormat.format(record.booth_count)}</td>
-                <td>{numberFormat.format(record.voter_count)}</td>
-                <td>{new Date(record.created_at).toLocaleDateString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="table-footer">
-        <span>{numberFormat.format(records.length)} database Panchayat record{records.length === 1 ? "" : "s"}</span>
-        {search && onClearSearch && <button onClick={onClearSearch}>Clear search <ArrowRight size={14} /></button>}
-      </div>
-    </>
-  ) : <EmptyState title="No Panchayat records">{search ? "No Panchayat records match this search." : "Admin-managed Panchayat records will appear here when available."}</EmptyState>;
-}
-
-function FieldWorkerDashboard({ data, records, summary, loading, error, search, onNavigate, onClearSearch }) {
-  const panchayats = filterRecordsBySearch(summary.panchayats, search, ["name", "booth_count", "voter_count"]);
+function FieldWorkerDashboard({ data, records, summary, loading, error, onNavigate }) {
   const metrics = [
-    ["Panchayats", summary.panchayatCount, Building2, "green"],
-    ["Booths", summary.boothCount, Vote, "blue"],
-    ["Voters", summary.voterCount, Users, "purple"],
+    { label: "Blocks", value: (records?.blocks ?? []).filter(({ parent_id }) => parent_id != null).length, icon: Building2, color: "green", page: "Blocks" },
+    { label: "Booths", value: summary.boothCount, icon: Vote, color: "blue", page: "Booth Management" },
+    { label: "Panchayats", value: summary.panchayatCount, icon: MapPin, color: "purple", page: "Panchayats" },
+    { label: "Voters", value: summary.voterCount, icon: Users, color: "orange", page: "Voter Insights" },
   ];
-  const maximumBoothCount = Math.max(1, ...summary.panchayats.map(({ booth_count }) => booth_count));
   return (
     <>
       <h1 className="welcome-heading"><span>Welcome to Nathnagar Constituency</span></h1>
@@ -398,36 +613,22 @@ function FieldWorkerDashboard({ data, records, summary, loading, error, search, 
       </section>
 
       <section className="stats-grid dashboard-stats">
-        {metrics.map(([label, value, icon, color]) => (
-          <StatCard key={label} label={label} value={loading ? "…" : error ? "—" : numberFormat.format(value)} note="Database records" icon={icon} color={color} sourceTag="LIVE" />
+        {metrics.map(({ label, value, icon, color, page }) => (
+          <StatCard key={label} label={label} value={loading ? "…" : error ? "—" : numberFormat.format(value)} note="Database records" icon={icon} color={color} sourceTag="LIVE" onClick={() => onNavigate(page)} />
         ))}
       </section>
       {error && <p className="admin-error" role="alert">{error}</p>}
       {loading ? <p className="admin-loading" role="status">Loading database records...</p> : !error && (
         <>
           <section className="workspace-grid dashboard-panels">
-            <Panel title="Panchayat coverage" eyebrow="LIVE DATABASE" action={<button className="text-action" onClick={() => onNavigate("Panchayats")}>All Panchayats <ArrowRight size={15} /></button>}>
-              {summary.panchayats.length ? (
-                <div className="status-chart">
-                  {summary.panchayats.slice(0, 5).map((panchayat) => (
-                    <div className="status-chart-row" key={panchayat.id}>
-                      <div className="status-chart-label"><span>{panchayat.name}</span><strong>{numberFormat.format(panchayat.booth_count)} booths</strong></div>
-                      <div className="status-chart-track"><span className="status-chart-fill strong-fill" style={{ width: `${(panchayat.booth_count / maximumBoothCount) * 100}%` }} /></div>
-                    </div>
-                  ))}
-                </div>
-              ) : <EmptyState title="No Panchayat records">Admin-managed records will appear here when available.</EmptyState>}
-              <DataNote>Booth coverage is calculated from Booth records assigned to each Panchayat.</DataNote>
+            <Panel title="Local administration" eyebrow="LIVE DATABASE" action={<button className="text-action" onClick={() => onNavigate("Blocks")}>Browse Blocks <ArrowRight size={15} /></button>}>
+              <p className="admin-dashboard-copy">Open a Block to view its assigned Panchayats.</p>
             </Panel>
 
             <Panel title="Recent activity" eyebrow="FIELD ACTIVITY">
               <EmptyState title="No activity records connected">Field activity records are not stored in the current database.</EmptyState>
             </Panel>
           </section>
-
-          <Panel title="Panchayat directory preview" eyebrow="LOCAL ADMINISTRATION" action={<button className="text-action" onClick={() => onNavigate("Panchayats")}>Open directory <ArrowRight size={15} /></button>}>
-            <FieldWorkerPanchayatTable records={panchayats.slice(0, 4)} onClearSearch={onClearSearch} search={search} />
-          </Panel>
         </>
       )}
     </>
@@ -462,8 +663,8 @@ function BoothManagement({ summary, records = [], loading = false, error = "" })
         {error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading Booth records...</p> : records.length ? (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>BOOTH NUMBER</th><th>BOOTH</th><th>PANCHAYAT</th><th>ADDRESS</th></tr></thead>
-              <tbody>{records.map((record) => <tr key={record.id}><td>{record.booth_number}</td><td>{record.name}</td><td>{record.panchayat_name}</td><td>{record.address}</td></tr>)}</tbody>
+              <thead><tr><th>BOOTH NUMBER</th><th>BOOTH</th><th>BLOCK</th><th>PANCHAYAT</th><th>ADDRESS</th></tr></thead>
+              <tbody>{records.map((record) => <tr key={record.id}><td>{record.booth_number}</td><td>{record.name}</td><td>{record.block_name ? `${record.parent_block_name} · ${record.block_name}` : "Unassigned"}</td><td>{record.panchayat_name}</td><td>{record.address}</td></tr>)}</tbody>
             </table>
           </div>
         ) : <EmptyState title="No Booth records">Admin-managed Booth records will appear here when available.</EmptyState>}
@@ -472,7 +673,14 @@ function BoothManagement({ summary, records = [], loading = false, error = "" })
   );
 }
 
-function PanchayatsPage({ records, totalCount, onClearSearch, isFieldWorker = false, loading = false, error = "", search = "" }) {
+function PanchayatsPage({
+  records,
+  totalCount,
+  onClearSearch,
+  isFieldWorker = false,
+  loading = false,
+  error = "",
+}) {
   return (
     <>
       <PageHeading eyebrow="WORKSPACE" title="Panchayats" description="Browse and search Admin-managed Panchayat records." />
@@ -480,11 +688,29 @@ function PanchayatsPage({ records, totalCount, onClearSearch, isFieldWorker = fa
         {isFieldWorker
           ? error ? <p className="admin-error" role="alert">{error}</p>
             : loading ? <p className="admin-loading" role="status">Loading Panchayat records...</p>
-            : <FieldWorkerPanchayatTable records={records} onClearSearch={onClearSearch} search={search} />
+            : <DatabasePanchayatTable records={records} />
           : <PanchayatTable records={records} totalCount={totalCount} onClearSearch={onClearSearch} />}
       </Panel>
     </>
   );
+}
+
+function DatabasePanchayatTable({ records }) {
+  return records.length ? (
+    <div className="table-wrap">
+      <table>
+        <thead><tr><th>PANCHAYAT</th><th>BLOCK</th><th>BOOTHS</th><th>VOTERS</th></tr></thead>
+        <tbody>{records.map((record) => (
+          <tr key={record.id}>
+            <td>{record.name}</td>
+            <td>{record.block_name ?? "Unassigned"}</td>
+            <td>{numberFormat.format(record.booth_count ?? 0)}</td>
+            <td>{numberFormat.format(record.voter_count ?? 0)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  ) : <EmptyState title="No Panchayat records">Admin-managed records will appear here when available.</EmptyState>;
 }
 
 function VoterInsights({ summary, records = [], loading = false, error = "", isFieldWorker = false }) {
@@ -498,8 +724,8 @@ function VoterInsights({ summary, records = [], loading = false, error = "", isF
       <Panel title={isFieldWorker ? "Voter records" : "No voter-level insights yet"} eyebrow={isFieldWorker ? "READ ONLY" : "VOTER RECORDS REQUIRED"}>
         {isFieldWorker ? (error ? <p className="admin-error" role="alert">{error}</p> : loading ? <p className="admin-loading" role="status">Loading Voter records...</p> : records.length ? (
           <div className="table-wrap"><table>
-            <thead><tr><th>VOTER</th><th>ELECTORAL ROLL ID</th><th>BOOTH</th><th>PANCHAYAT</th></tr></thead>
-            <tbody>{records.map((record) => <tr key={record.id}><td>{record.name}</td><td>{record.electoral_roll_id}</td><td>{record.booth_number} · {record.booth_name}</td><td>{record.panchayat_name}</td></tr>)}</tbody>
+            <thead><tr><th>VOTER</th><th>ELECTORAL ROLL ID</th><th>BLOCK</th><th>BOOTH</th><th>PANCHAYAT</th></tr></thead>
+            <tbody>{records.map((record) => <tr key={record.id}><td>{record.name}</td><td>{record.electoral_roll_id}</td><td>{record.block_name ? `${record.parent_block_name} · ${record.block_name}` : "Unassigned"}</td><td>{record.booth_number} · {record.booth_name}</td><td>{record.panchayat_name}</td></tr>)}</tbody>
           </table></div>
         ) : <EmptyState title="No Voter records">Admin-managed Voter records will appear here when available.</EmptyState>) : (
           <EmptyState title="Individual voter data is unavailable">Demographic breakdowns, turnout patterns, and voter-level search should be connected to verified, appropriately protected data before they are shown.</EmptyState>
@@ -661,6 +887,8 @@ function Metric({ icon: Icon, label, value }) {
 export function WorkspacePage(props) {
   const {
     page,
+    selectedBlock,
+    selectedPanchayat,
     data,
     summary,
     panchayats,
@@ -686,19 +914,69 @@ export function WorkspacePage(props) {
   const fieldWorkerPanchayats = filterRecordsBySearch(
     fieldWorkerSummary.panchayats,
     search,
-    ["name", "booth_count", "voter_count"],
+    ["name", "block_name", "parent_block_name", "booth_count", "voter_count"],
   );
   const fieldWorkerBooths = filterRecordsBySearch(
     fieldWorkerRecords?.booths ?? [],
     search,
-    ["booth_number", "name", "panchayat_name", "address"],
+    ["booth_number", "name", "panchayat_name", "block_name", "parent_block_name", "address"],
   );
   const fieldWorkerVoters = filterRecordsBySearch(
     fieldWorkerRecords?.voters ?? [],
     search,
-    ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name"],
+    ["name", "electoral_roll_id", "booth_number", "booth_name", "panchayat_name", "block_name", "parent_block_name"],
   );
   switch (page) {
+    case "Blocks": return (
+      <BlocksPage
+        blocks={fieldWorkerRecords?.blocks ?? []}
+        panchayats={fieldWorkerSummary.panchayats}
+        loading={fieldWorkerLoading}
+        error={fieldWorkerError}
+        isLive={isAdmin || isFieldWorker}
+        search={search}
+        onNavigate={onNavigate}
+      />
+    );
+    case "Block Details": return (
+      <BlockDetailsPage
+        block={selectedBlock}
+        blocks={fieldWorkerRecords?.blocks ?? []}
+        panchayats={fieldWorkerSummary.panchayats}
+        loading={fieldWorkerLoading}
+        error={fieldWorkerError}
+        isLive={isAdmin || isFieldWorker}
+        search={search}
+        onNavigate={onNavigate}
+      />
+    );
+    case "Panchayat Details": {
+      const selectedPanchayatRecord = resolveSelectedPanchayat(
+        selectedPanchayat,
+        fieldWorkerSummary.panchayats,
+      );
+      const selectedPanchayatId = getDatabasePanchayatId(selectedPanchayatRecord);
+      const selectedPanchayatName = normalizeName(selectedPanchayatRecord?.name);
+      const assignedBooths = (fieldWorkerRecords?.booths ?? []).filter((booth) => {
+        if (selectedPanchayatId !== null) {
+          return Number(booth.panchayat_id) === selectedPanchayatId;
+        }
+        return (
+          selectedPanchayatName !== "" &&
+          normalizeName(booth.panchayat_name) === selectedPanchayatName
+        );
+      });
+      return (
+        <PanchayatDetailsPage
+          panchayat={selectedPanchayatRecord}
+          block={selectedBlock}
+          booths={assignedBooths}
+          loading={fieldWorkerLoading}
+          error={fieldWorkerError}
+          onNavigate={onNavigate}
+        />
+      );
+    }
     case "Election Overview": return isFieldWorker
       ? fieldWorkerError ? <p className="admin-error" role="alert">{fieldWorkerError}</p>
         : fieldWorkerLoading ? <p className="admin-loading" role="status">Loading database records...</p>
@@ -712,7 +990,7 @@ export function WorkspacePage(props) {
     case "Panchayats": return isAdmin
       ? <AdminDataManagement page={page} accessToken={accessToken} search={search} onRecordsChanged={onAdminRecordsChanged} />
       : isFieldWorker
-        ? <PanchayatsPage records={fieldWorkerPanchayats} totalCount={fieldWorkerSummary.panchayatCount} onClearSearch={() => onSearchChange("")} isFieldWorker loading={fieldWorkerLoading} error={fieldWorkerError} search={search} />
+        ? <PanchayatsPage records={fieldWorkerPanchayats} totalCount={fieldWorkerSummary.panchayatCount} onClearSearch={() => onSearchChange("")} isFieldWorker loading={fieldWorkerLoading} error={fieldWorkerError} />
         : <PanchayatsPage records={panchayats} totalCount={data.panchayats.length} onClearSearch={() => onSearchChange("")} />;
     case "Voter Insights": return isAdmin
       ? <AdminDataManagement page={page} accessToken={accessToken} search={search} onRecordsChanged={onAdminRecordsChanged} />
@@ -737,9 +1015,18 @@ export function WorkspacePage(props) {
     case "Dashboard":
     default:
       return isAdmin
-        ? <AdminDashboard data={data} summary={adminSummary} isLoading={adminSummaryLoading} error={[adminSummaryError, fieldWorkerError].filter(Boolean).join(" ")} onNavigate={onNavigate} />
+        ? <AdminDashboard
+            data={data}
+            summary={adminSummary}
+            isLoading={adminSummaryLoading}
+            error={[adminSummaryError, fieldWorkerError].filter(Boolean).join(" ")}
+            onNavigate={onNavigate}
+            blocks={fieldWorkerRecords?.blocks ?? []}
+            hierarchyLoading={fieldWorkerLoading}
+            hierarchyError={fieldWorkerError}
+          />
         : isFieldWorker
-          ? <FieldWorkerDashboard data={data} records={fieldWorkerRecords} summary={fieldWorkerSummary} loading={fieldWorkerLoading} error={fieldWorkerError} search={search} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />
-          : <Dashboard data={data} summary={summary} panchayats={panchayats} activities={activities} onNavigate={onNavigate} onClearSearch={() => onSearchChange("")} />;
+          ? <FieldWorkerDashboard data={data} records={fieldWorkerRecords} summary={fieldWorkerSummary} loading={fieldWorkerLoading} error={fieldWorkerError} onNavigate={onNavigate} />
+          : <Dashboard data={data} summary={summary} activities={activities} onNavigate={onNavigate} />;
   }
 }
